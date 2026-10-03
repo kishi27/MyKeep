@@ -10,7 +10,7 @@ import type { LinkPreview } from "./linkPreview";
 import { NOTE_COLORS } from "./types";
 import type { Attachment, ChecklistInput, Note, NoteColor, NoteInput } from "./types";
 
-type View = "active" | "unpinned" | "imageless" | "archived" | "trash";
+type View = "active" | "pinned" | "unpinned" | "unlabeled" | "imageless" | "archived" | "trash";
 type NoteList = { notes: Note[]; hasMore: boolean };
 type NoteCheck = { notes: Pick<Note, "id" | "updated_at">[] };
 type SidebarCounts = { views: Record<View, number>; labels: Record<string, number> };
@@ -350,6 +350,7 @@ export default function App() {
   const [autoRefreshSeconds, setAutoRefreshSeconds] = useState(savedRefreshSeconds);
   const [previews, setPreviews] = useState<Record<string, LinkPreview | null>>({});
   const settingsMenuRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const labelMenuRef = useRef<HTMLDivElement>(null);
   const pendingImagesRef = useRef<PendingImage[]>([]);
   const notesRef = useRef(notes);
@@ -1512,9 +1513,13 @@ export default function App() {
           <button type="button" className="menu-toggle" aria-label="メニューを開く" aria-controls="sidebar" aria-expanded={menuOpen} onClick={() => setMenuOpen(true)}>☰</button>
           <h1><button type="button" className="home-button" onClick={goHome} title="メモへ戻る">MyKeep</button></h1>
         </div>
-        <label className="search-field">検索
-          <input type="search" value={search} maxLength={200} placeholder="タイトル・本文・URL" onChange={(event) => setSearch(event.target.value)} />
-        </label>
+        <div className="search-field">
+          <label htmlFor="note-search">検索</label>
+          <div className="search-input-wrap">
+            <input id="note-search" ref={searchInputRef} type="search" value={search} maxLength={200} placeholder="タイトル・本文・URL" onChange={(event) => setSearch(event.target.value)} />
+            {search.length > 0 && <button type="button" className="search-clear" aria-label="検索をクリア" title="検索をクリア" onClick={() => { setSearch(""); searchInputRef.current?.focus(); }}>×</button>}
+          </div>
+        </div>
         <div className="header-actions">
           <button type="button" className={`icon-button${selecting ? " active" : ""}`} aria-label={selecting ? "選択モードを終了" : "メモを選択"}
             title={selecting ? "選択を終了" : "選択"} aria-pressed={selecting} disabled={working || (!selecting && loading)}
@@ -1538,7 +1543,8 @@ export default function App() {
           <div className="sidebar-title">MyKeep</div>
           <nav className="sidebar-nav" aria-label="メモの表示">
             {([
-              ["active", "💡", "メモ"], ["unpinned", "○", "ピンなし"], ["imageless", "▧", "画像なし"],
+              ["active", "💡", "メモ"], ["pinned", "📌", "ピンあり"], ["unpinned", "○", "ピンなし"],
+              ["unlabeled", "🏷", "ラベルなし"], ["imageless", "▧", "画像なし"],
               ["archived", "📦", "アーカイブ"], ["trash", "🗑", "ゴミ箱"],
             ] as const).map(([itemView, icon, name]) => <button type="button" key={itemView}
               className={view === itemView && !labelFilter ? "selected" : ""}
@@ -1566,14 +1572,14 @@ export default function App() {
       </div>}
       {bulkResult && <p className={bulkResult.failed ? "error" : "bulk-result"} role={bulkResult.failed ? "alert" : "status"}>{bulkResult.message}</p>}
       {error && !draft && <p className="error" role="alert">{error}</p>}
-      {!loading && notes.length === 0 && <p className="empty">{search.trim() || labelFilter ? "該当するメモはありません。" : view === "active" ? "メモはまだありません。" : view === "unpinned" ? "ピンなしのメモはありません。" : view === "imageless" ? "画像なしのメモはありません。" : view === "archived" ? "アーカイブはありません。" : "ゴミ箱は空です。"}</p>}
+      {!loading && notes.length === 0 && <p className="empty">{search.trim() || labelFilter ? "該当するメモはありません。" : view === "active" ? "メモはまだありません。" : view === "pinned" ? "ピンありのメモはありません。" : view === "unpinned" ? "ピンなしのメモはありません。" : view === "unlabeled" ? "ラベルなしのメモはありません。" : view === "imageless" ? "画像なしのメモはありません。" : view === "archived" ? "アーカイブはありません。" : "ゴミ箱は空です。"}</p>}
 
       {view === "trash" ? (
         <section className="grid" aria-label="ゴミ箱一覧">{notes.map(renderNoteCard)}</section>
       ) : <>
         {pinnedNotes.length > 0 && <section className="grid" aria-label="ピン留めメモ">{pinnedNotes.map(renderNoteCard)}</section>}
         {pinnedNotes.length > 0 && otherNotes.length > 0 && <div className="note-section-separator" aria-hidden="true" />}
-        {otherNotes.length > 0 && <section className="grid" aria-label={view === "active" ? "メモ一覧" : view === "unpinned" ? "ピンなしメモ一覧" : view === "imageless" ? "画像なしメモ一覧" : "アーカイブ一覧"}>{otherNotes.map(renderNoteCard)}</section>}
+        {otherNotes.length > 0 && <section className="grid" aria-label={view === "active" ? "メモ一覧" : view === "unpinned" ? "ピンなしメモ一覧" : view === "unlabeled" ? "ラベルなしメモ一覧" : view === "imageless" ? "画像なしメモ一覧" : "アーカイブ一覧"}>{otherNotes.map(renderNoteCard)}</section>}
       </>}
 
       {(loading || loadingMore) && <p className="status">読み込み中…</p>}
