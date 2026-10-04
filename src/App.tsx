@@ -77,10 +77,7 @@ function restoreListAnchor(anchor: ScrollAnchor) {
 }
 
 function SettingsIcon() {
-  return <svg className="settings-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    <path d="m9 3-.6 2.4-2 .9-2.2-.7-3 5.2 1.7 1.6v2.3l-1.7 1.6 3 5.2 2.2-.7 2 .9L9 24h6l.6-2.4 2-.9 2.2.7 3-5.2-1.7-1.6v-2.3l1.7-1.6-3-5.2-2.2.7-2-.9L15 3Z" transform="translate(2 0) scale(.83)" />
-    <circle cx="12" cy="12" r="3" />
-  </svg>;
+  return <span className="settings-icon" aria-hidden="true" />;
 }
 
 function ImageViewer({ images, initialIndex, onClose }: { images: ViewerImage[]; initialIndex: number; onClose: () => void }) {
