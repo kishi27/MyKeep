@@ -3,34 +3,35 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>MyKeepの設定</title>
+    <title data-i18n="options.title">MyKeepの設定</title>
     <link rel="stylesheet" href="style.css" />
     <script type="module" src="options.js"></script>
   </head>
   <body class="options">
-    <h1>MyKeepの設定</h1>
+    <h1 data-i18n="options.title">MyKeepの設定</h1>
     <form id="optionsForm">
-      <label>API URL<input id="apiUrl" type="url" placeholder="https://example.com/api/capture" required /></label>
-      <label>API KEY<input id="apiKey" type="password" autocomplete="off" required /></label>
+      <label><span data-i18n="options.language">言語</span><select id="language"><option value="ja">日本語</option><option value="en">English</option></select></label>
+      <label><span data-i18n="options.apiUrl">API URL</span><input id="apiUrl" type="url" placeholder="https://example.com/api/capture" required /></label>
+      <label><span data-i18n="options.apiKey">API KEY</span><input id="apiKey" type="password" autocomplete="off" required /></label>
       <p id="status" role="status" aria-live="polite"></p>
-      <button type="submit" class="primary">設定を保存</button>
+      <button type="submit" class="primary" data-i18n="options.save">設定を保存</button>
     </form>
     <section class="repair-section" aria-labelledby="repairTitle">
-      <h2 id="repairTitle">サムネイル補完</h2>
-      <p>画像がないメモのURLをChromeで1件ずつ開いて補完します。通常メモとアーカイブが対象です。</p>
-      <p>開始時にサイトへのアクセス許可を確認します。設定画面を閉じても処理は続きます。</p>
-      <p id="repairCount">未取得件数：未確認</p>
+      <h2 id="repairTitle" data-i18n="repair.title">サムネイル補完</h2>
+      <p data-i18n="repair.intro">画像がないメモのURLをChromeで1件ずつ開いて補完します。通常メモとアーカイブが対象です。</p>
+      <p data-i18n="repair.permissionInfo">開始時にサイトへのアクセス許可を確認します。設定画面を閉じても処理は続きます。</p>
+      <p id="repairCount" data-i18n="repair.countUnknown">未取得件数：未確認</p>
       <div class="repair-actions">
-        <button id="repairCheck" class="secondary" type="button">未取得件数を確認</button>
-        <button id="repairStart" class="primary" type="button">サムネイル補完を開始</button>
+        <button id="repairCheck" class="secondary" data-i18n="repair.checkCount" type="button">未取得件数を確認</button>
+        <button id="repairStart" class="primary" data-i18n="repair.start" type="button">サムネイル補完を開始</button>
       </div>
       <p id="repairProgress" role="status" aria-live="polite"></p>
       <div class="repair-actions">
-        <button id="repairPause" class="secondary" type="button" hidden>一時停止</button>
-        <button id="repairResume" class="primary" type="button" hidden>続きから再開</button>
-        <button id="repairCancel" class="secondary" type="button" hidden>中止</button>
-        <button id="repairRetry" class="secondary" type="button" hidden>失敗分だけ再試行</button>
-        <button id="repairClear" class="secondary" type="button" disabled>結果をクリア</button>
+        <button id="repairPause" class="secondary" data-i18n="repair.pause" type="button" hidden>一時停止</button>
+        <button id="repairResume" class="primary" data-i18n="repair.resume" type="button" hidden>続きから再開</button>
+        <button id="repairCancel" class="secondary" data-i18n="repair.cancel" type="button" hidden>中止</button>
+        <button id="repairRetry" class="secondary" data-i18n="repair.retry" type="button" hidden>失敗分だけ再試行</button>
+        <button id="repairClear" class="secondary" data-i18n="repair.clear" type="button" disabled>結果をクリア</button>
       </div>
       <p id="repairStatus" role="status" aria-live="polite"></p>
     </section>

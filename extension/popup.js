@@ -1,5 +1,6 @@
 import { captureEndpoint, IMAGE_TYPES, MAX_IMAGE_BYTES, noteUrlFromCaptureEndpoint } from "./shared.js";
 import { readPageMetadata } from "./pageMetadata.js";
+import { getLanguage, initializeI18n, localizeError, onLanguageChange, t } from "./i18n.js";
 
 const MAX_LABEL_SELECTIONS = 50;
 
@@ -27,14 +28,26 @@ let selectedLabels = [];
 let savedNoteUrl = "";
 let pagePreview = { title: "", description: "", image: "", hostname: "" };
 let titleEdited = false;
+let statusMessage = "";
+let statusIsError = false;
+let labelStatusMessage = "";
 
-function showStatus(message, error = false) {
-  status.textContent = message;
-  status.classList.toggle("error", error);
+function renderStatus() {
+  status.textContent = !statusMessage ? "" : statusIsError
+    ? localizeError(statusMessage, "popup.error.sendFailed")
+    : t(statusMessage);
+  status.classList.toggle("error", statusIsError);
 }
 
 function showLabelStatus(message) {
-  labelStatus.textContent = message;
+  labelStatusMessage = message;
+  labelStatus.textContent = message ? t(message) : "";
+}
+
+function showStatus(message, error = false) {
+  statusMessage = message;
+  statusIsError = error;
+  renderStatus();
 }
 
 function isHttpUrl(value) {
@@ -102,13 +115,18 @@ function renderSelectedLabels() {
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "text-button";
-    remove.setAttribute("aria-label", `${name}を解除`);
+    remove.setAttribute("aria-label", t("popup.removeLabel", { label: name }));
     remove.textContent = "×";
     remove.addEventListener("click", () => toggleLabel(name, false));
     chip.append(remove);
     selectedLabelsElement.append(chip);
   }
-  labelToggle.textContent = selectedLabels.length ? `ラベル（${selectedLabels.length}件）` : "ラベルを選択";
+  if (selectedLabels.length) {
+    const key = selectedLabels.length === 1 ? "popup.selectedLabelsOne" : "popup.selectedLabelsMany";
+    labelToggle.textContent = t(key, { count: new Intl.NumberFormat(getLanguage() === "en" ? "en-US" : "ja-JP").format(selectedLabels.length) });
+  } else {
+    labelToggle.textContent = t("popup.selectLabels");
+  }
 }
 
 function updateLabelOptionState() {
@@ -181,9 +199,9 @@ async function loadLabels() {
       return "";
     }));
     renderLabelOptions();
-    if (!availableLabels.length) showLabelStatus("既存ラベルはありません。");
+    if (!availableLabels.length) showLabelStatus("popup.noLabels");
   } catch {
-    showLabelStatus("既存ラベルを読み込めませんでした。");
+    showLabelStatus("popup.labelsLoadFailed");
   }
 }
 
@@ -238,7 +256,7 @@ async function loadPage() {
     setSaveEnabled();
   } catch {
     save.disabled = true;
-    showStatus("現在のページを読み取れませんでした。", true);
+    showStatus("popup.pageUnreadable", true);
   }
 }
 
@@ -253,18 +271,18 @@ function clearImage() {
 
 function setImage(file) {
   if (!IMAGE_TYPES.includes(file.type.toLowerCase())) {
-    showStatus("JPEG・PNG・WebP・GIF・AVIF の画像を選んでください。", true);
+    showStatus("popup.imageTypeError", true);
     return;
   }
   if (!file.size || file.size > MAX_IMAGE_BYTES) {
-    showStatus("画像は1枚20MB以下にしてください。", true);
+    showStatus("popup.imageSizeError", true);
     return;
   }
   clearImage();
   selectedImage = file;
   previewUrl = URL.createObjectURL(file);
   previewImage.src = previewUrl;
-  imageName.textContent = file.name || "貼り付けた画像";
+  imageName.textContent = file.name || t("popup.pastedImageName");
   imagePreview.hidden = false;
   showStatus("");
 }
@@ -289,16 +307,13 @@ document.addEventListener("click", (event) => {
 
 title.addEventListener("input", () => { titleEdited = true; });
 
-void loadPage();
-void loadLabels();
-
 document.getElementById("removeImage").addEventListener("click", clearImage);
 openNote.addEventListener("click", async () => {
   if (!savedNoteUrl) return;
   try {
     await chrome.tabs.create({ url: savedNoteUrl });
   } catch {
-    showStatus("MyKeepを開けませんでした。", true);
+    showStatus("popup.error.openFailed", true);
   }
 });
 imageFile.addEventListener("change", () => {
@@ -320,13 +335,13 @@ form.addEventListener("submit", async (event) => {
   if (save.disabled) return;
   save.disabled = true;
   hideSavedNoteLink();
-  showStatus("保存中…");
+  showStatus("popup.saving");
   try {
     const settings = await chrome.storage.local.get(["apiUrl", "apiKey"]);
-    if (!settings.apiUrl || !settings.apiKey) throw new Error("設定で API URL と API KEY を保存してください。");
+    if (!settings.apiUrl || !settings.apiKey) throw new Error("popup.error.apiKeyRequired");
     const endpoint = captureEndpoint(settings.apiUrl);
     if (!isHttpUrl(url.value) || url.value.length > 2000) {
-      throw new Error("このページのURLは保存できません。");
+      throw new Error("popup.error.invalidPageUrl");
     }
 
     const data = new FormData();
@@ -353,7 +368,7 @@ form.addEventListener("submit", async (event) => {
     } catch {
       result = null;
     }
-    if (!response.ok) throw new Error(result?.error || "保存できませんでした。");
+    if (!response.ok) throw new Error(result?.error || "popup.error.saveFailed");
     body.value = "";
     clearImage();
     const noteId = result?.note?.id;
@@ -365,10 +380,19 @@ form.addEventListener("submit", async (event) => {
         hideSavedNoteLink();
       }
     }
-    showStatus("保存しました。");
+    showStatus("popup.saved");
   } catch (error) {
-    showStatus(error instanceof Error ? error.message : "送信できませんでした。", true);
+    showStatus(error instanceof Error ? error.message : "popup.error.sendFailed", true);
   } finally {
     setSaveEnabled();
   }
 });
+
+onLanguageChange(() => {
+  renderSelectedLabels();
+  if (labelStatusMessage) labelStatus.textContent = t(labelStatusMessage);
+  renderStatus();
+});
+await initializeI18n();
+void loadPage();
+void loadLabels();

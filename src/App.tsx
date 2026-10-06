@@ -7,6 +7,8 @@ import { readKeepZip } from "./keepImport";
 import type { KeepZipResult } from "./keepImport";
 import { displayLinkTitle, getLinkPreview, mergeLinkPreview } from "./linkPreview";
 import type { LinkPreview } from "./linkPreview";
+import { LANGUAGE_SETTING, LanguageContext, savedLanguage, useI18n, formatMessage } from "./i18n";
+import type { Language, MessageKey } from "./i18n";
 import { NOTE_COLORS } from "./types";
 import type { Attachment, ChecklistInput, Note, NoteColor, NoteInput } from "./types";
 
@@ -28,7 +30,6 @@ type ViewerImage = Pick<Attachment, "id" | "url" | "filename"> & { kind: "attach
 const emptyNote: NoteDraft = { title: "", body: "", url: "", pinned: false, archived: false, color: "default", card_image: "auto", checklist: [] };
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"];
-const countFormat = new Intl.NumberFormat("ja-JP");
 const IMAGE_EXTENSIONS: Record<string, string> = {
   "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif", "image/avif": "avif",
 };
@@ -81,6 +82,8 @@ function SettingsIcon() {
 }
 
 function ImageViewer({ images, initialIndex, onClose }: { images: ViewerImage[]; initialIndex: number; onClose: () => void }) {
+  const { t, locale } = useI18n();
+  const countFormat = new Intl.NumberFormat(locale);
   const [index, setIndex] = useState(initialIndex);
   const closeRef = useRef<HTMLButtonElement>(null);
   const touchRef = useRef<{ x: number; y: number } | null>(null);
@@ -109,12 +112,12 @@ function ImageViewer({ images, initialIndex, onClose }: { images: ViewerImage[];
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [images.length, onClose]);
-  return <div className="image-viewer" role="dialog" aria-modal="true" aria-label="画像ビューア"
+  return <div className="image-viewer" role="dialog" aria-modal="true" aria-label={t("画像ビューア")}
     onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <div className="image-viewer-toolbar">
-      <span aria-live="polite">{index + 1} / {images.length}</span>
-      {image.kind === "preview" && <a href={image.url} target="_blank" rel="noopener noreferrer">元画像を開く</a>}
-      <button type="button" ref={closeRef} aria-label="画像ビューアを閉じる" title="閉じる" onClick={onClose}>×</button>
+      <span aria-live="polite">{countFormat.format(index + 1)} / {countFormat.format(images.length)}</span>
+      {image.kind === "preview" && <a href={image.url} target="_blank" rel="noopener noreferrer">{t("元画像を開く")}</a>}
+      <button type="button" ref={closeRef} aria-label={t("画像ビューアを閉じる")} title={t("閉じる")} onClick={onClose}>×</button>
     </div>
     <div className="image-viewer-stage"
       onTouchStart={(event) => { touchRef.current = event.touches.length === 1 ? { x: event.touches[0].clientX, y: event.touches[0].clientY } : null; }}
@@ -129,8 +132,8 @@ function ImageViewer({ images, initialIndex, onClose }: { images: ViewerImage[];
       <img src={image.url} alt={image.filename} draggable={false} referrerPolicy={image.kind === "preview" ? "no-referrer" : undefined} />
     </div>
     <div className="image-viewer-navigation">
-      <button type="button" disabled={images.length < 2} onClick={() => move(-1)} aria-label="前の画像">← 前</button>
-      <button type="button" disabled={images.length < 2} onClick={() => move(1)} aria-label="次の画像">次 →</button>
+      <button type="button" disabled={images.length < 2} onClick={() => move(-1)} aria-label={t("前の画像")}>{t("← 前")}</button>
+      <button type="button" disabled={images.length < 2} onClick={() => move(1)} aria-label={t("次の画像")}>{t("次 →")}</button>
     </div>
   </div>;
 }
@@ -203,11 +206,11 @@ function resolveCardImage(note: Note, preview: LinkPreview | null): CardImage | 
   return preview?.image ? { url: preview.image, kind: "preview", extra: 0 } : null;
 }
 
-function notePreview(note: Note, showTitle: boolean, showBody: boolean, showArchive = false, cardImage: CardImage | null = null) {
+function notePreview(note: Note, showTitle: boolean, showBody: boolean, showArchive: boolean, cardImage: CardImage | null, t: (key: MessageKey, values?: Record<string, string | number>) => string) {
   const imageAttachments = note.attachments.filter((item) => IMAGE_TYPES.includes(item.mime_type));
   return <>
-    {note.pinned && <span className="pin-label">📌 ピン留め</span>}
-    {showArchive && note.archived && <span className="pin-label">📦 アーカイブ</span>}
+    {note.pinned && <span className="pin-label">{t("📌 ピン留め")}</span>}
+    {showArchive && note.archived && <span className="pin-label">{t("📦 アーカイブ")}</span>}
     {showTitle && note.title && <strong>{note.title}</strong>}
     {showBody && note.body && <span className="body-preview">{note.body}</span>}
     {note.checklist.length > 0 && <span className="checklist-preview">
@@ -224,7 +227,7 @@ function notePreview(note: Note, showTitle: boolean, showBody: boolean, showArch
         {cardImage.extra > 0 && <span className="photo-count">+{cardImage.extra}</span>}
       </span>
     )}
-    {note.attachments.length > imageAttachments.length && <span className="pin-label">📎 添付ファイル {note.attachments.length - imageAttachments.length}件</span>}
+    {note.attachments.length > imageAttachments.length && <span className="pin-label">{t("📎 添付ファイル {0}件", { 0: note.attachments.length - imageAttachments.length })}</span>}
   </>;
 }
 
@@ -246,6 +249,7 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 function LabelCreator({ disabled, onCreate }: { disabled: boolean; onCreate: (name: string) => Promise<CreatedLabel> }) {
+  const { t, uiMessage } = useI18n();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [message, setMessage] = useState("");
@@ -269,18 +273,29 @@ function LabelCreator({ disabled, onCreate }: { disabled: boolean; onCreate: (na
   }
   return <div className="standalone-label-creator">
     <button type="button" className="create-label-button" disabled={disabled} aria-expanded={open}
-      onClick={() => { setOpen((current) => !current); setMessage(""); setError(""); }}>＋ 新規ラベルを作成</button>
+      onClick={() => { setOpen((current) => !current); setMessage(""); setError(""); }}>{t("＋ 新規ラベルを作成")}</button>
     {open && <div className="new-label-row">
-      <input aria-label="新しいラベル名" placeholder="新しいラベル名" maxLength={100} value={name} disabled={disabled}
+      <input aria-label={t("新しいラベル名")} placeholder={t("新しいラベル名")} maxLength={100} value={name} disabled={disabled}
         onChange={(event) => setName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); void add(); } }} />
-      <button type="button" disabled={disabled || !name.trim()} onClick={() => void add()}>追加</button>
+      <button type="button" disabled={disabled || !name.trim()} onClick={() => void add()}>{t("追加")}</button>
     </div>}
-    {message && <p role="status">{message}</p>}
-    {error && <p className="error" role="alert">{error}</p>}
+    {message && <p role="status">{uiMessage(message)}</p>}
+    {error && <p className="error" role="alert">{uiMessage(error)}</p>}
   </div>;
 }
 
 export default function App() {
+  const [language, setLanguage] = useState<Language>(savedLanguage);
+  useEffect(() => {
+    document.documentElement.lang = language;
+    try { localStorage.setItem(LANGUAGE_SETTING, language); } catch { /* In-memory settings still work. */ }
+  }, [language]);
+  return <LanguageContext.Provider value={{ language, setLanguage }}><MyKeep /></LanguageContext.Provider>;
+}
+
+function MyKeep() {
+  const { language, setLanguage, locale, t, uiMessage } = useI18n();
+  const countFormat = new Intl.NumberFormat(locale);
   const [view, setView] = useState<View>("active");
   const [search, setSearch] = useState("");
   const [labelFilter, setLabelFilter] = useState("");
@@ -1099,7 +1114,7 @@ export default function App() {
       && (operation !== "archive" || !note.archived)
       && (operation !== "unarchive" || note.archived)).map((note) => note.id);
     if (!ids.length || working || bulkWorkingRef.current) return;
-    if (operation === "permanent" && !window.confirm(`選択した${ids.length}件を完全に削除しますか？\nこの操作は元に戻せません。`)) return;
+    if (operation === "permanent" && !window.confirm(t("選択した{0}件を完全に削除しますか？\nこの操作は元に戻せません。", { 0: countFormat.format(ids.length) }))) return;
     const removedLabel = labelFilter;
     const messages: Record<BulkOperation, string> = {
       archive: "アーカイブしました。", unarchive: "メモに戻しました。", trash: "ゴミ箱に移動しました。",
@@ -1160,8 +1175,7 @@ export default function App() {
       bulkWorkingRef.current = false;
       setWorking(false);
     }
-    const particle = operation === "addLabels" ? "件に" : operation === "removeLabel" ? "件から" : "件を";
-    const message = `${succeeded.length}${particle}${messages[operation]}`;
+    const message = formatMessage("{0}件: {1}", { 0: countFormat.format(succeeded.length), 1: messages[operation] });
     setBulkResult({ message: `成功 ${succeeded.length}件 / 失敗 ${failed}件${failed ? `：${[...new Set(failures)].join("、")}` : ""}`, failed });
     endSelection();
     reloadList();
@@ -1196,7 +1210,7 @@ export default function App() {
   }
 
   async function remove() {
-    if (!editingId || working || !window.confirm("このメモをゴミ箱に移動しますか？")) return;
+    if (!editingId || working || !window.confirm(t("このメモをゴミ箱に移動しますか？"))) return;
     setWorking(true);
     setError("");
     try {
@@ -1225,7 +1239,7 @@ export default function App() {
   }
 
   async function permanentlyRemove(note: Note) {
-    if (working || !window.confirm("このメモと添付画像を完全に削除しますか？元に戻せません。")) return;
+    if (working || !window.confirm(t("このメモと添付画像を完全に削除しますか？元に戻せません。"))) return;
     setWorking(true);
     setError("");
     try {
@@ -1245,7 +1259,7 @@ export default function App() {
     try {
       const current = await api<SidebarCounts>("/api/counts");
       setCounts(current);
-      if (!current.views.trash || !window.confirm(`ゴミ箱内の${countFormat.format(current.views.trash)}件のメモを完全に削除しますか？\nこの操作は取り消せません。`)) return;
+      if (!current.views.trash || !window.confirm(t("ゴミ箱内の{0}件のメモを完全に削除しますか？\nこの操作は取り消せません。", { 0: countFormat.format(current.views.trash) }))) return;
       setUndoAction(null);
       const result = await api<{ deleted: number; failed: number }>("/api/trash", { method: "DELETE" });
       endSelection();
@@ -1312,7 +1326,7 @@ export default function App() {
   }
 
   async function removeImage(attachment: Attachment) {
-    if (!editingId || working || !window.confirm("この画像を削除しますか？")) return;
+    if (!editingId || working || !window.confirm(t("この画像を削除しますか？"))) return;
     setWorking(true);
     setError("");
     try {
@@ -1449,7 +1463,7 @@ export default function App() {
   const labelManagerBusy = deletingLabels || creatingStandaloneLabel || renamingLabel || working || undoing;
   const viewerImages: ViewerImage[] = editorAttachments.filter((attachment) => IMAGE_TYPES.includes(attachment.mime_type))
     .map(({ id, url, filename }) => ({ id, url, filename, kind: "attachment" }));
-  if (editorPreviewImage) viewerImages.push({ id: "link-preview", url: editorPreviewImage, filename: "サムネイル", kind: "preview" });
+  if (editorPreviewImage) viewerImages.push({ id: "link-preview", url: editorPreviewImage, filename: t("サムネイル"), kind: "preview" });
   const pinnedNotes = notes.filter((note) => note.pinned);
   const otherNotes = notes.filter((note) => !note.pinned);
   const selectedActiveCount = notes.filter((note) => selectedNoteIds.has(note.id) && !note.archived).length;
@@ -1464,11 +1478,11 @@ export default function App() {
     return (
       <article className={`card${selected ? " selected-card" : ""}`} data-color={note.color} data-note-id={note.id} key={note.id}
         onClick={selecting ? () => toggleNoteSelection(note.id) : undefined}>
-        {selecting && <button type="button" className="card-select" aria-label={`${note.title || "無題のメモ"}${selected ? "の選択を解除" : "を選択"}`}
+        {selecting && <button type="button" className="card-select" aria-label={t(selected ? "{0}の選択を解除" : "{0}を選択", { 0: note.title || t("無題のメモ") })}
           aria-pressed={selected} disabled={working} onClick={(event) => { event.stopPropagation(); toggleNoteSelection(note.id); }}>{selected ? "✓" : ""}</button>}
         {view === "trash" || selecting
-          ? <div className="card-content">{notePreview(note, cardShowTitle, cardShowBody, Boolean(labelFilter), contentImage)}</div>
-          : <button className="card-content" onClick={() => openEditor(note)} aria-label={`${note.title || "無題のメモ"}を編集`}>{notePreview(note, cardShowTitle, cardShowBody, Boolean(labelFilter), contentImage)}</button>}
+          ? <div className="card-content">{notePreview(note, cardShowTitle, cardShowBody, Boolean(labelFilter), contentImage, t)}</div>
+          : <button className="card-content" onClick={() => openEditor(note)} aria-label={t("{0}を編集", { 0: note.title || t("無題のメモ") })}>{notePreview(note, cardShowTitle, cardShowBody, Boolean(labelFilter), contentImage, t)}</button>}
         {note.url && (visiblePreview
           ? <a className="link-preview" href={note.url} target="_blank" rel="noopener noreferrer"
               tabIndex={selecting ? -1 : undefined} onClick={selecting ? (event) => event.preventDefault() : undefined}
@@ -1487,16 +1501,16 @@ export default function App() {
               tabIndex={selecting ? -1 : undefined} onClick={selecting ? (event) => event.preventDefault() : undefined}
               onAuxClick={selecting ? (event) => event.preventDefault() : undefined}>{note.url}</a>)}
         {remainingDays !== null && <p className="trash-countdown">
-          {remainingDays > 0 ? `完全削除まで あと${remainingDays}日` : "まもなく完全削除"}
+          {remainingDays > 0 ? t("完全削除まで あと{0}日", { 0: countFormat.format(remainingDays) }) : t("まもなく完全削除")}
         </p>}
         {!selecting && <div className="card-actions">
           {view === "trash" ? <>
-            <button disabled={working} onClick={() => restore(note)}>復元</button>
-            <button className="danger" disabled={working} onClick={() => permanentlyRemove(note)}>完全削除</button>
+            <button disabled={working} onClick={() => restore(note)}>{t("復元")}</button>
+            <button className="danger" disabled={working} onClick={() => permanentlyRemove(note)}>{t("完全削除")}</button>
           </> : <>
-            <button disabled={working} onClick={() => updateFlag(note, "pinned")}>{note.pinned ? "ピン解除" : "ピン留め"}</button>
-            <button disabled={working} onClick={() => updateFlag(note, "archived")}>{note.archived ? "戻す" : "アーカイブ"}</button>
-            {note.archived && <button className="trash-action" disabled={working} onClick={() => moveCardToTrash(note)}>ゴミ箱</button>}
+            <button disabled={working} onClick={() => updateFlag(note, "pinned")}>{note.pinned ? t("ピン解除") : t("ピン留め")}</button>
+            <button disabled={working} onClick={() => updateFlag(note, "archived")}>{note.archived ? t("戻す") : t("アーカイブ")}</button>
+            {note.archived && <button className="trash-action" disabled={working} onClick={() => moveCardToTrash(note)}>{t("ゴミ箱")}</button>}
           </>}
         </div>}
       </article>
@@ -1507,42 +1521,42 @@ export default function App() {
     <main className={`app${selecting ? " selecting" : ""}`}>
       <header className="topbar">
         <div className="brand">
-          <button type="button" className="menu-toggle" aria-label="メニューを開く" aria-controls="sidebar" aria-expanded={menuOpen} onClick={() => setMenuOpen(true)}>☰</button>
-          <h1><button type="button" className="home-button" onClick={goHome} title="メモへ戻る">MyKeep</button></h1>
+          <button type="button" className="menu-toggle" aria-label={t("メニューを開く")} aria-controls="sidebar" aria-expanded={menuOpen} onClick={() => setMenuOpen(true)}>☰</button>
+          <h1><button type="button" className="home-button" onClick={goHome} title={t("メモへ戻る")}>MyKeep</button></h1>
         </div>
         <div className="search-field">
-          <label htmlFor="note-search">検索</label>
+          <label htmlFor="note-search">{t("検索")}</label>
           <div className="search-input-wrap">
-            <input id="note-search" ref={searchInputRef} type="search" value={search} maxLength={200} placeholder="タイトル・本文・URL" onChange={(event) => setSearch(event.target.value)} />
-            {search.length > 0 && <button type="button" className="search-clear" aria-label="検索をクリア" title="検索をクリア" onClick={() => { setSearch(""); searchInputRef.current?.focus(); }}>×</button>}
+            <input id="note-search" ref={searchInputRef} type="search" value={search} maxLength={200} placeholder={t("タイトル・本文・URL")} onChange={(event) => setSearch(event.target.value)} />
+            {search.length > 0 && <button type="button" className="search-clear" aria-label={t("検索をクリア")} title={t("検索をクリア")} onClick={() => { setSearch(""); searchInputRef.current?.focus(); }}>×</button>}
           </div>
         </div>
         <div className="header-actions">
-          <button type="button" className={`icon-button${selecting ? " active" : ""}`} aria-label={selecting ? "選択モードを終了" : "メモを選択"}
-            title={selecting ? "選択を終了" : "選択"} aria-pressed={selecting} disabled={working || (!selecting && loading)}
+          <button type="button" className={`icon-button${selecting ? " active" : ""}`} aria-label={selecting ? t("選択モードを終了") : t("メモを選択")}
+            title={selecting ? t("選択を終了") : t("選択")} aria-pressed={selecting} disabled={working || (!selecting && loading)}
             onClick={() => { if (selecting) endSelection(); else { setSelecting(true); setBulkResult(null); } }}>☑</button>
-          <button type="button" className="icon-button" aria-label="更新" title="更新" onClick={refreshCurrent}>↻</button>
+          <button type="button" className="icon-button" aria-label={t("更新")} title={t("更新")} onClick={refreshCurrent}>↻</button>
           <div className="settings-menu-wrap" ref={settingsMenuRef}>
-            <button type="button" className="icon-button" aria-label="設定メニュー" title="設定" aria-expanded={settingsMenuOpen} aria-haspopup="menu" onClick={() => setSettingsMenuOpen((open) => !open)}><SettingsIcon /></button>
+            <button type="button" className="icon-button" aria-label={t("設定メニュー")} title={t("設定")} aria-expanded={settingsMenuOpen} aria-haspopup="menu" onClick={() => setSettingsMenuOpen((open) => !open)}><SettingsIcon /></button>
             {settingsMenuOpen && <div className="settings-dropdown" role="menu">
-              <button type="button" role="menuitem" onClick={() => { setSettingsMenuOpen(false); setSettingsOpen(true); }}>設定</button>
-              <button type="button" role="menuitem" onClick={() => { setSettingsMenuOpen(false); setImportOpen(true); }}>Keep Import</button>
-              <button type="button" role="menuitem" onClick={() => { setSettingsMenuOpen(false); setExportOpen(true); void exportAll(); }} disabled={exporting || importing}>Export</button>
+              <button type="button" role="menuitem" onClick={() => { setSettingsMenuOpen(false); setSettingsOpen(true); }}>{t("設定")}</button>
+              <button type="button" role="menuitem" onClick={() => { setSettingsMenuOpen(false); setImportOpen(true); }}>{t("インポート")}</button>
+              <button type="button" role="menuitem" onClick={() => { setSettingsMenuOpen(false); setExportOpen(true); void exportAll(); }} disabled={exporting || importing}>{t("エクスポート")}</button>
             </div>}
           </div>
-          {view !== "trash" && <button type="button" className="primary new-note" aria-label="新規メモ" onClick={() => openEditor()}><span className="new-note-icon">＋</span><span className="new-note-text"> 新規メモ</span></button>}
+          {view !== "trash" && <button type="button" className="primary new-note" aria-label={t("新規メモ")} onClick={() => openEditor()}><span className="new-note-icon">＋</span><span className="new-note-text"> {t("新規メモ")}</span></button>}
         </div>
       </header>
 
-      {menuOpen && <button type="button" className="sidebar-scrim" aria-label="メニューを閉じる" onClick={() => setMenuOpen(false)} />}
+      {menuOpen && <button type="button" className="sidebar-scrim" aria-label={t("メニューを閉じる")} onClick={() => setMenuOpen(false)} />}
       <div className="app-layout">
-        <aside id="sidebar" ref={sidebarRef} className={`sidebar${menuOpen ? " open" : ""}`} aria-label="サイドバー">
+        <aside id="sidebar" ref={sidebarRef} className={`sidebar${menuOpen ? " open" : ""}`} aria-label={t("サイドバー")}>
           <div className="sidebar-title">MyKeep</div>
-          <nav className="sidebar-nav" aria-label="メモの表示">
+          <nav className="sidebar-nav" aria-label={t("メモの表示")}>
             {([
-              ["active", "💡", "メモ"], ["pinned", "📌", "ピンあり"], ["unpinned", "○", "ピンなし"],
-              ["unlabeled", "🏷", "ラベルなし"], ["imageless", "▧", "画像なし"],
-              ["archived", "📦", "アーカイブ"], ["trash", "🗑", "ゴミ箱"],
+              ["active", "💡", t("メモ")], ["pinned", "📌", t("ピンあり")], ["unpinned", "○", t("ピンなし")],
+              ["unlabeled", "🏷", t("ラベルなし")], ["imageless", "▧", t("画像なし")],
+              ["archived", "📦", t("アーカイブ")], ["trash", "🗑", t("ゴミ箱")],
             ] as const).map(([itemView, icon, name]) => <button type="button" key={itemView}
               className={view === itemView && !labelFilter ? "selected" : ""}
               aria-current={view === itemView && !labelFilter ? "page" : undefined} onClick={() => selectView(itemView)}>
@@ -1551,205 +1565,210 @@ export default function App() {
             </button>)}
           </nav>
           <div className="sidebar-labels">
-            <h2>ラベル</h2>
-            <nav className="sidebar-nav" aria-label="ラベル">
+            <h2>{t("ラベル")}</h2>
+            <nav className="sidebar-nav" aria-label={t("ラベル")}>
               {availableLabels.map((name) => <button type="button" className={view === "active" && labelFilter === name ? "selected" : ""} aria-current={view === "active" && labelFilter === name ? "page" : undefined} onClick={() => selectLabel(name)} key={name} title={name}>
                 <span aria-hidden="true">🏷</span><span className="nav-name">{name}</span>
                 <span className="nav-count">{counts ? countFormat.format(Object.hasOwn(counts.labels, name) ? counts.labels[name] : 0) : "—"}</span>
               </button>)}
-              <button type="button" onClick={openLabelManager}><SettingsIcon />ラベル整理</button>
+              <button type="button" onClick={openLabelManager}><SettingsIcon />{t("ラベル整理")}</button>
             </nav>
           </div>
         </aside>
         <div className="main-content" ref={mainContentRef}>
-      {(pullDistance > 0 || pullRefreshing) && <div className="pull-indicator" role="status" style={{ height: pullRefreshing ? 38 : Math.min(pullDistance, 80) }}>↻ {pullRefreshing ? "更新中…" : pullDistance >= 70 ? "離して更新" : "引っ張って更新"}</div>}
+      {(pullDistance > 0 || pullRefreshing) && <div className="pull-indicator" role="status" style={{ height: pullRefreshing ? 38 : Math.min(pullDistance, 80) }}>↻ {pullRefreshing ? t("更新中…") : pullDistance >= 70 ? t("離して更新") : t("引っ張って更新")}</div>}
       {view === "trash" && <div className="trash-header">
-        <p>ゴミ箱内のメモは7日後に削除されます。</p>
-        <button type="button" className="danger" disabled={working || importing || exporting || !counts?.views.trash} onClick={() => void clearTrash()}>ゴミ箱を空にする</button>
+        <p>{t("ゴミ箱内のメモは7日後に削除されます。")}</p>
+        <button type="button" className="danger" disabled={working || importing || exporting || !counts?.views.trash} onClick={() => void clearTrash()}>{t("ゴミ箱を空にする")}</button>
       </div>}
-      {bulkResult && <p className={bulkResult.failed ? "error" : "bulk-result"} role={bulkResult.failed ? "alert" : "status"}>{bulkResult.message}</p>}
-      {error && !draft && <p className="error" role="alert">{error}</p>}
-      {!loading && notes.length === 0 && <p className="empty">{search.trim() || labelFilter ? "該当するメモはありません。" : view === "active" ? "メモはまだありません。" : view === "pinned" ? "ピンありのメモはありません。" : view === "unpinned" ? "ピンなしのメモはありません。" : view === "unlabeled" ? "ラベルなしのメモはありません。" : view === "imageless" ? "画像なしのメモはありません。" : view === "archived" ? "アーカイブはありません。" : "ゴミ箱は空です。"}</p>}
+      {bulkResult && <p className={bulkResult.failed ? "error" : "bulk-result"} role={bulkResult.failed ? "alert" : "status"}>{uiMessage(bulkResult.message)}</p>}
+      {error && !draft && <p className="error" role="alert">{uiMessage(error)}</p>}
+      {!loading && notes.length === 0 && <p className="empty">{search.trim() || labelFilter ? t("該当するメモはありません。") : view === "active" ? t("メモはまだありません。") : view === "pinned" ? t("ピンありのメモはありません。") : view === "unpinned" ? t("ピンなしのメモはありません。") : view === "unlabeled" ? t("ラベルなしのメモはありません。") : view === "imageless" ? t("画像なしのメモはありません。") : view === "archived" ? t("アーカイブはありません。") : t("ゴミ箱は空です。")}</p>}
 
       {view === "trash" ? (
-        <section className="grid" aria-label="ゴミ箱一覧">{notes.map(renderNoteCard)}</section>
+        <section className="grid" aria-label={t("ゴミ箱一覧")}>{notes.map(renderNoteCard)}</section>
       ) : <>
-        {pinnedNotes.length > 0 && <section className="grid" aria-label="ピン留めメモ">{pinnedNotes.map(renderNoteCard)}</section>}
+        {pinnedNotes.length > 0 && <section className="grid" aria-label={t("ピン留めメモ")}>{pinnedNotes.map(renderNoteCard)}</section>}
         {pinnedNotes.length > 0 && otherNotes.length > 0 && <div className="note-section-separator" aria-hidden="true" />}
-        {otherNotes.length > 0 && <section className="grid" aria-label={view === "active" ? "メモ一覧" : view === "unpinned" ? "ピンなしメモ一覧" : view === "unlabeled" ? "ラベルなしメモ一覧" : view === "imageless" ? "画像なしメモ一覧" : "アーカイブ一覧"}>{otherNotes.map(renderNoteCard)}</section>}
+        {otherNotes.length > 0 && <section className="grid" aria-label={view === "active" ? t("メモ一覧") : view === "unpinned" ? t("ピンなしメモ一覧") : view === "unlabeled" ? t("ラベルなしメモ一覧") : view === "imageless" ? t("画像なしメモ一覧") : t("アーカイブ一覧")}>{otherNotes.map(renderNoteCard)}</section>}
       </>}
 
-      {(loading || loadingMore) && <p className="status">読み込み中…</p>}
+      {(loading || loadingMore) && <p className="status">{t("読み込み中…")}</p>}
       <div className="list-sentinel" ref={sentinelRef} aria-hidden="true" />
         </div>
       </div>
 
-      {selecting && <section className="bulk-toolbar" aria-label="一括操作">
+      {selecting && <section className="bulk-toolbar" aria-label={t("一括操作")}>
         <div className="bulk-selection-controls">
-          <strong aria-live="polite">{selectedNoteIds.size}件選択</strong>
-          <button type="button" disabled={working || loading} onClick={() => setSelectedNoteIds(new Set(notes.map((note) => note.id)))}>全選択</button>
-          <button type="button" disabled={working || !selectedNoteIds.size} onClick={() => setSelectedNoteIds(new Set())}>全解除</button>
-          <button type="button" disabled={working} onClick={endSelection}>終了</button>
+          <strong aria-live="polite">{t("{0}件選択", { 0: countFormat.format(selectedNoteIds.size) })}</strong>
+          <button type="button" disabled={working || loading} onClick={() => setSelectedNoteIds(new Set(notes.map((note) => note.id)))}>{t("全選択")}</button>
+          <button type="button" disabled={working || !selectedNoteIds.size} onClick={() => setSelectedNoteIds(new Set())}>{t("全解除")}</button>
+          <button type="button" disabled={working} onClick={endSelection}>{t("終了")}</button>
         </div>
         <div className="bulk-operation-controls">
           {view === "trash" ? <>
-            <button type="button" disabled={working || !selectedNoteIds.size} onClick={() => void runBulk("restore")}>復元</button>
-            <button type="button" className="bulk-danger" disabled={working || !selectedNoteIds.size} onClick={() => void runBulk("permanent")}>完全削除</button>
+            <button type="button" disabled={working || !selectedNoteIds.size} onClick={() => void runBulk("restore")}>{t("復元")}</button>
+            <button type="button" className="bulk-danger" disabled={working || !selectedNoteIds.size} onClick={() => void runBulk("permanent")}>{t("完全削除")}</button>
           </> : <>
-            {view === "active" && labelFilter && <button type="button" disabled={working || !selectedNoteIds.size} onClick={() => void runBulk("removeLabel")}>このラベルを外す</button>}
+            {view === "active" && labelFilter && <button type="button" disabled={working || !selectedNoteIds.size} onClick={() => void runBulk("removeLabel")}>{t("このラベルを外す")}</button>}
             {labelFilter ? <>
-              <button type="button" disabled={working || !selectedActiveCount} onClick={() => void runBulk("archive")}>アーカイブ</button>
-              <button type="button" disabled={working || !selectedArchivedCount} onClick={() => void runBulk("unarchive")}>メモに戻す</button>
-            </> : <button type="button" disabled={working || !selectedNoteIds.size} onClick={() => void runBulk(view === "archived" ? "unarchive" : "archive")}>{view === "archived" ? "メモに戻す" : "アーカイブ"}</button>}
-            <button type="button" disabled={working || !selectedNoteIds.size} onClick={() => { setBulkLabels([]); setBulkLabelsOpen(true); }}>{labelFilter ? "他のラベルを付ける" : "ラベル"}</button>
-            <button type="button" className="bulk-danger" disabled={working || !selectedNoteIds.size} onClick={() => void runBulk("trash")}>ゴミ箱</button>
+              <button type="button" disabled={working || !selectedActiveCount} onClick={() => void runBulk("archive")}>{t("アーカイブ")}</button>
+              <button type="button" disabled={working || !selectedArchivedCount} onClick={() => void runBulk("unarchive")}>{t("メモに戻す")}</button>
+            </> : <button type="button" disabled={working || !selectedNoteIds.size} onClick={() => void runBulk(view === "archived" ? "unarchive" : "archive")}>{view === "archived" ? t("メモに戻す") : t("アーカイブ")}</button>}
+            <button type="button" disabled={working || !selectedNoteIds.size} onClick={() => { setBulkLabels([]); setBulkLabelsOpen(true); }}>{labelFilter ? t("他のラベルを付ける") : t("ラベル")}</button>
+            <button type="button" className="bulk-danger" disabled={working || !selectedNoteIds.size} onClick={() => void runBulk("trash")}>{t("ゴミ箱")}</button>
           </>}
-          {working && <span role="status">処理中…</span>}
+          {working && <span role="status">{t("処理中…")}</span>}
         </div>
       </section>}
 
       {undoAction && <div className="snackbar" role="status" aria-atomic="true">
-        <span>{undoAction.message}</span>
-        {undoAction.undo && <button type="button" disabled={working || undoing} onClick={() => void undoLastAction()}>取り消す</button>}
+        <span>{uiMessage(undoAction.message)}</span>
+        {undoAction.undo && <button type="button" disabled={working || undoing} onClick={() => void undoLastAction()}>{t("取り消す")}</button>}
       </div>}
 
       {bulkLabelsOpen && <div className="overlay" onMouseDown={(event) => { if (event.target === event.currentTarget && !working && !creatingStandaloneLabel) setBulkLabelsOpen(false); }}>
-        <section className="utility-modal" role="dialog" aria-modal="true" aria-label="一括ラベル追加">
-          <div className="editor-heading"><h2>ラベルを追加</h2><button type="button" className="close" aria-label="閉じる" disabled={working || creatingStandaloneLabel} onClick={() => setBulkLabelsOpen(false)}>×</button></div>
+        <section className="utility-modal" role="dialog" aria-modal="true" aria-label={t("一括ラベル追加")}>
+          <div className="editor-heading"><h2>{t("ラベルを追加")}</h2><button type="button" className="close" aria-label={t("閉じる")} disabled={working || creatingStandaloneLabel} onClick={() => setBulkLabelsOpen(false)}>×</button></div>
           <LabelCreator disabled={working || creatingStandaloneLabel || bulkLabels.length >= 50} onCreate={(name) => createStandaloneLabel(name, true)} />
           <div className="label-manager-list">
             {availableLabels.map((name) => <label key={name}><input type="checkbox" checked={bulkLabels.includes(name)} disabled={working || creatingStandaloneLabel || (!bulkLabels.includes(name) && bulkLabels.length >= 50)}
               onChange={() => setBulkLabels((current) => current.includes(name) ? current.filter((label) => label !== name) : [...current, name])} />{name}</label>)}
           </div>
-          {!availableLabels.length && <p>登録済みラベルはありません。</p>}
+          {!availableLabels.length && <p>{t("登録済みラベルはありません。")}</p>}
           <div className="label-manager-actions">
-            <button type="button" className="label-cancel-button" disabled={working || creatingStandaloneLabel} onClick={() => setBulkLabelsOpen(false)}>キャンセル</button>
-            <button type="button" className="primary" disabled={working || creatingStandaloneLabel || !bulkLabels.length || !selectedNoteIds.size} onClick={() => void runBulk("addLabels", bulkLabels)}>適用</button>
+            <button type="button" className="label-cancel-button" disabled={working || creatingStandaloneLabel} onClick={() => setBulkLabelsOpen(false)}>{t("キャンセル")}</button>
+            <button type="button" className="primary" disabled={working || creatingStandaloneLabel || !bulkLabels.length || !selectedNoteIds.size} onClick={() => void runBulk("addLabels", bulkLabels)}>{t("適用")}</button>
           </div>
         </section>
       </div>}
 
       {settingsOpen && <div className="overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}>
-        <section className="utility-modal" role="dialog" aria-modal="true" aria-label="設定">
-          <div className="editor-heading"><h2>設定</h2><button type="button" className="close" aria-label="閉じる" onClick={() => setSettingsOpen(false)}>×</button></div>
-          <label className="setting-row"><input type="checkbox" checked={richLinkPreview} onChange={(event) => setRichLinkPreview(event.target.checked)} />リッチリンクプレビュー</label>
-          <label className="setting-row"><input type="checkbox" checked={cardShowTitle} onChange={(event) => setCardShowTitle(event.target.checked)} />タイトル表示</label>
-          <label className="setting-row"><input type="checkbox" checked={cardShowBody} onChange={(event) => setCardShowBody(event.target.checked)} />本文表示</label>
-          <label className="setting-row"><input type="checkbox" checked={darkMode} onChange={(event) => setDarkMode(event.target.checked)} />ダークモード</label>
-          <label className="setting-row">自動更新間隔
+        <section className="utility-modal" role="dialog" aria-modal="true" aria-label={t("設定")}>
+          <div className="editor-heading"><h2>{t("設定")}</h2><button type="button" className="close" aria-label={t("閉じる")} onClick={() => setSettingsOpen(false)}>×</button></div>
+          <label className="setting-row">{t("言語")}
+            <select value={language} onChange={(event) => setLanguage(event.target.value === "en" ? "en" : "ja")}>
+              <option value="ja">日本語</option><option value="en">English</option>
+            </select>
+          </label>
+          <label className="setting-row"><input type="checkbox" checked={richLinkPreview} onChange={(event) => setRichLinkPreview(event.target.checked)} />{t("リッチリンクプレビュー")}</label>
+          <label className="setting-row"><input type="checkbox" checked={cardShowTitle} onChange={(event) => setCardShowTitle(event.target.checked)} />{t("タイトル表示")}</label>
+          <label className="setting-row"><input type="checkbox" checked={cardShowBody} onChange={(event) => setCardShowBody(event.target.checked)} />{t("本文表示")}</label>
+          <label className="setting-row"><input type="checkbox" checked={darkMode} onChange={(event) => setDarkMode(event.target.checked)} />{t("ダークモード")}</label>
+          <label className="setting-row">{t("自動更新間隔")}
             <select value={autoRefreshSeconds} onChange={(event) => {
               setAutoRefreshSeconds(REFRESH_SECONDS.find((seconds) => String(seconds) === event.target.value) ?? 30);
             }}>
-              {REFRESH_SECONDS.map((seconds) => <option key={seconds} value={seconds}>{seconds}秒</option>)}
+              {REFRESH_SECONDS.map((seconds) => <option key={seconds} value={seconds}>{t("{0}秒", { 0: countFormat.format(seconds) })}</option>)}
             </select>
           </label>
         </section>
       </div>}
 
       {labelManagerOpen && <div className="overlay" onMouseDown={(event) => { if (event.target === event.currentTarget && !labelManagerBusy) closeLabelManager(); }}>
-        <section className="utility-modal" role="dialog" aria-modal="true" aria-label="ラベル整理">
-          <div className="editor-heading"><h2>ラベル整理</h2><button type="button" className="close" aria-label="閉じる" onClick={closeLabelManager} disabled={labelManagerBusy}>×</button></div>
+        <section className="utility-modal" role="dialog" aria-modal="true" aria-label={t("ラベル整理")}>
+          <div className="editor-heading"><h2>{t("ラベル整理")}</h2><button type="button" className="close" aria-label={t("閉じる")} onClick={closeLabelManager} disabled={labelManagerBusy}>×</button></div>
           {!labelDeleteConfirm && <LabelCreator disabled={labelManagerBusy || editingLabel !== null} onCreate={(name) => createStandaloneLabel(name)} />}
           {labelDeleteConfirm ? <>
             <p>{deleteLabelNames.length <= 3
-              ? `「${deleteLabelNames.join("」「")}」を削除しますか？`
-              : `選択した${deleteLabelNames.length}件のラベルを削除しますか？`}</p>
-            <p>これらのラベルはメモからも外れます。メモ本体は削除されません。</p>
+              ? t("「{0}」を削除しますか？", { 0: deleteLabelNames.join(language === "en" ? "”, “" : "」「") })
+              : t("選択した{0}件のラベルを削除しますか？", { 0: countFormat.format(deleteLabelNames.length) })}</p>
+            <p>{t("これらのラベルはメモからも外れます。メモ本体は削除されません。")}</p>
           </> : <div className="label-manager-list">
             {availableLabels.map((name) => <div className="label-manager-entry" key={labelKey(name)}>
               <div className="label-manager-row">
                 <label><input type="checkbox" checked={labelsToDelete.includes(labelKey(name))}
                   disabled={labelManagerBusy || editingLabel !== null || (labelsToDelete.length >= 50 && !labelsToDelete.includes(labelKey(name)))}
                   onChange={() => toggleLabelToDelete(name)} />{name}</label>
-                <button type="button" aria-label={`${name}のラベル名を変更`} title="ラベル名を変更"
+                <button type="button" aria-label={t("{0}のラベル名を変更", { 0: name })} title={t("ラベル名を変更")}
                   disabled={labelManagerBusy || editingLabel !== null}
                   onClick={() => { setEditingLabel(name); setRenameName(name); setRenameError(""); setLabelDeleteError(""); }}>✎</button>
               </div>
               {editingLabel === name && <div className="label-rename-row">
-                <input aria-label="変更後のラベル名" value={renameName} maxLength={100} disabled={labelManagerBusy}
+                <input aria-label={t("変更後のラベル名")} value={renameName} maxLength={100} disabled={labelManagerBusy}
                   onChange={(event) => setRenameName(event.target.value)}
                   onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); void renameLabel(); } }} />
-                <button type="button" className="primary" disabled={labelManagerBusy || !renameName.trim()} onClick={() => void renameLabel()}>保存</button>
-                <button type="button" disabled={labelManagerBusy} onClick={cancelLabelRename}>キャンセル</button>
+                <button type="button" className="primary" disabled={labelManagerBusy || !renameName.trim()} onClick={() => void renameLabel()}>{t("保存")}</button>
+                <button type="button" disabled={labelManagerBusy} onClick={cancelLabelRename}>{t("キャンセル")}</button>
               </div>}
             </div>)}
-            {availableLabels.length === 0 && <p>ラベルはありません。</p>}
+            {availableLabels.length === 0 && <p>{t("ラベルはありません。")}</p>}
           </div>}
-          {labelDeleteError && <p className="error" role="alert">{labelDeleteError}</p>}
-          {renameError && <p className="error" role="alert">{renameError}</p>}
+          {labelDeleteError && <p className="error" role="alert">{uiMessage(labelDeleteError)}</p>}
+          {renameError && <p className="error" role="alert">{uiMessage(renameError)}</p>}
           <div className="label-manager-actions">
-            <button type="button" className="label-cancel-button" onClick={() => labelDeleteConfirm ? setLabelDeleteConfirm(false) : closeLabelManager()} disabled={labelManagerBusy}>キャンセル</button>
+            <button type="button" className="label-cancel-button" onClick={() => labelDeleteConfirm ? setLabelDeleteConfirm(false) : closeLabelManager()} disabled={labelManagerBusy}>{t("キャンセル")}</button>
             {labelDeleteConfirm
-              ? <button type="button" className="label-delete-button" onClick={() => { void deleteSelectedLabels(); }} disabled={labelManagerBusy || deleteLabelNames.length === 0}>削除</button>
-              : <button type="button" className="label-delete-button" onClick={() => { setLabelDeleteError(""); setLabelDeleteConfirm(true); }} disabled={labelManagerBusy || editingLabel !== null || deleteLabelNames.length === 0}>選択したラベルを削除</button>}
+              ? <button type="button" className="label-delete-button" onClick={() => { void deleteSelectedLabels(); }} disabled={labelManagerBusy || deleteLabelNames.length === 0}>{t("削除")}</button>
+              : <button type="button" className="label-delete-button" onClick={() => { setLabelDeleteError(""); setLabelDeleteConfirm(true); }} disabled={labelManagerBusy || editingLabel !== null || deleteLabelNames.length === 0}>{t("選択したラベルを削除")}</button>}
           </div>
         </section>
       </div>}
 
       {importOpen && <div className="overlay" onMouseDown={(event) => { if (event.target === event.currentTarget && !importing) setImportOpen(false); }}>
-        <section className="utility-modal" role="dialog" aria-modal="true" aria-label="Google Keep Import">
-          <div className="editor-heading"><h2>Google Keep Import</h2><button type="button" className="close" aria-label="閉じる" onClick={() => setImportOpen(false)} disabled={importing}>×</button></div>
+        <section className="utility-modal" role="dialog" aria-modal="true" aria-label={t("Google Keep インポート")}>
+          <div className="editor-heading"><h2>{t("Google Keep インポート")}</h2><button type="button" className="close" aria-label={t("閉じる")} onClick={() => setImportOpen(false)} disabled={importing}>×</button></div>
           <div className="import-content">
-            <label>Takeout ZIPを選択
+            <label>{t("Takeout ZIPを選択")}
               <input type="file" accept=".zip,application/zip" onChange={importZip} disabled={importing || exporting} />
             </label>
-            {importMessage && <p role="status">{importMessage}</p>}
-            {importProgress && <p>メモ: {importProgress.notes.done} / {importProgress.notes.total}<br />
-              成功 {importProgress.notes.success}　ゴミ箱として取込 {importProgress.notes.trashed}　失敗 {importProgress.notes.failed}　スキップ {importProgress.notes.skipped}<br />
-              画像・添付: {importProgress.attachments.done} / {importProgress.attachments.total}<br />
-              成功 {importProgress.attachments.success}　失敗 {importProgress.attachments.failed}　スキップ {importProgress.attachments.skipped}</p>}
+            {importMessage && <p role="status">{uiMessage(importMessage)}</p>}
+            {importProgress && <p>{t("メモ")}: {countFormat.format(importProgress.notes.done)} / {countFormat.format(importProgress.notes.total)}<br />
+              {t("成功")} {countFormat.format(importProgress.notes.success)} / {t("ゴミ箱として取込")} {countFormat.format(importProgress.notes.trashed)} / {t("失敗")} {countFormat.format(importProgress.notes.failed)} / {t("スキップ")} {countFormat.format(importProgress.notes.skipped)}<br />
+              {t("画像・添付")}: {countFormat.format(importProgress.attachments.done)} / {countFormat.format(importProgress.attachments.total)}<br />
+              {t("成功")} {countFormat.format(importProgress.attachments.success)} / {t("失敗")} {countFormat.format(importProgress.attachments.failed)} / {t("スキップ")} {countFormat.format(importProgress.attachments.skipped)}</p>}
           </div>
         </section>
       </div>}
 
       {exportOpen && <div className="overlay" onMouseDown={(event) => { if (event.target === event.currentTarget && !exporting) setExportOpen(false); }}>
-        <section className="utility-modal" role="dialog" aria-modal="true" aria-label="Export">
-          <div className="editor-heading"><h2>Export</h2><button type="button" className="close" aria-label="閉じる" onClick={() => setExportOpen(false)} disabled={exporting}>×</button></div>
+        <section className="utility-modal" role="dialog" aria-modal="true" aria-label={t("エクスポート")}>
+          <div className="editor-heading"><h2>{t("エクスポート")}</h2><button type="button" className="close" aria-label={t("閉じる")} onClick={() => setExportOpen(false)} disabled={exporting}>×</button></div>
           {exportProgress && exportProgress.stage !== "done" && <p role="status">
-            メモ取得: {exportProgress.notesDone} / {exportProgress.notesTotal}<br />
-            添付取得: {exportProgress.attachmentsDone} / {exportProgress.attachmentsTotal}<br />
-            {exportProgress.stage === "zip" ? "ZIP作成中..." : exportProgress.stage === "notes" ? "メモ取得中..." : "添付取得中..."}
+            {t("メモ取得")}: {countFormat.format(exportProgress.notesDone)} / {countFormat.format(exportProgress.notesTotal)}<br />
+            {t("添付取得")}: {countFormat.format(exportProgress.attachmentsDone)} / {countFormat.format(exportProgress.attachmentsTotal)}<br />
+            {exportProgress.stage === "zip" ? t("ZIP作成中...") : exportProgress.stage === "notes" ? t("メモ取得中...") : t("添付取得中...")}
           </p>}
-          {exportMessage && <p role="status">{exportMessage}</p>}
-          {exportResult && <p>メモ {exportResult.notes}件　添付成功 {exportResult.attachmentsSucceeded}件　添付失敗 {exportResult.attachmentsFailed}件</p>}
+          {exportMessage && <p role="status">{uiMessage(exportMessage)}</p>}
+          {exportResult && <p>{t("メモ")}: {countFormat.format(exportResult.notes)} / {t("添付成功")}: {countFormat.format(exportResult.attachmentsSucceeded)} / {t("添付失敗")}: {countFormat.format(exportResult.attachmentsFailed)}</p>}
         </section>
       </div>}
 
       {draft && (
         <div className="overlay" onMouseDown={(event) => { if (event.target === event.currentTarget && !working) closeEditor(); }}>
-          <form className="editor" data-color={draft.color} onSubmit={save} onPaste={pasteImages} aria-label={editingId ? "メモを編集" : "新規メモ"}>
+          <form className="editor" data-color={draft.color} onSubmit={save} onPaste={pasteImages} aria-label={editingId ? t("メモを編集") : t("新規メモ")}>
             <div className="editor-heading">
-              <h2>{editingId ? "メモを編集" : "新規メモ"}</h2>
-              <button type="button" className="close" onClick={closeEditor} disabled={working} aria-label="閉じる">×</button>
+              <h2>{editingId ? t("メモを編集") : t("新規メモ")}</h2>
+              <button type="button" className="close" onClick={closeEditor} disabled={working} aria-label={t("閉じる")}>×</button>
             </div>
-            {error && <p className="error" role="alert">{error}</p>}
-            <label>タイトル<input value={draft.title} maxLength={300} onChange={(event) => setDraft({ ...draft, title: event.target.value })} /></label>
-            <label>本文<textarea value={draft.body} maxLength={100000} rows={3} onChange={(event) => setDraft({ ...draft, body: event.target.value })} /></label>
-            <section className="checklist-editor" aria-label="チェックリスト">
-              <div className="section-heading"><strong>チェックリスト</strong>
-                <button type="button" onClick={() => setDraft({ ...draft, checklist: [...draft.checklist, { text: "", checked: false }] })} disabled={draft.checklist.length >= 500}>＋ 項目を追加</button>
+            {error && <p className="error" role="alert">{uiMessage(error)}</p>}
+            <label>{t("タイトル")}<input value={draft.title} maxLength={300} onChange={(event) => setDraft({ ...draft, title: event.target.value })} /></label>
+            <label>{t("本文")}<textarea value={draft.body} maxLength={100000} rows={3} onChange={(event) => setDraft({ ...draft, body: event.target.value })} /></label>
+            <section className="checklist-editor" aria-label={t("チェックリスト")}>
+              <div className="section-heading"><strong>{t("チェックリスト")}</strong>
+                <button type="button" onClick={() => setDraft({ ...draft, checklist: [...draft.checklist, { text: "", checked: false }] })} disabled={draft.checklist.length >= 500}>{t("＋ 項目を追加")}</button>
               </div>
               {draft.checklist.map((item, index) => <div className="checklist-row" key={index}>
-                <input type="checkbox" checked={item.checked} aria-label={`${index + 1}番目の項目をチェック`}
+                <input type="checkbox" checked={item.checked} aria-label={t("{0}番目の項目をチェック", { 0: index + 1 })}
                   onChange={(event) => setDraft({ ...draft, checklist: draft.checklist.map((entry, position) => position === index ? { ...entry, checked: event.target.checked } : entry) })} />
-                <input value={item.text} maxLength={10000} aria-label={`${index + 1}番目の項目`} placeholder="項目"
+                <input value={item.text} maxLength={10000} aria-label={t("{0}番目の項目", { 0: index + 1 })} placeholder={t("項目")}
                   onChange={(event) => setDraft({ ...draft, checklist: draft.checklist.map((entry, position) => position === index ? { ...entry, text: event.target.value } : entry) })} />
-                <button type="button" aria-label={`${index + 1}番目の項目を削除`}
-                  onClick={() => setDraft({ ...draft, checklist: draft.checklist.filter((_, position) => position !== index) })}>削除</button>
+                <button type="button" aria-label={t("{0}番目の項目を削除", { 0: index + 1 })}
+                  onClick={() => setDraft({ ...draft, checklist: draft.checklist.filter((_, position) => position !== index) })}>{t("削除")}</button>
               </div>)}
             </section>
-            <section className="editor-labels" aria-label="ラベル">
-              <strong>ラベル</strong>
+            <section className="editor-labels" aria-label={t("ラベル")}>
+              <strong>{t("ラベル")}</strong>
               <div className="label-picker" ref={labelMenuRef}>
                 <button type="button" className="label-picker-toggle" aria-expanded={labelMenuOpen} aria-controls="editor-label-options"
-                  onClick={() => setLabelMenuOpen((open) => !open)}>ラベルを選択 <span aria-hidden="true">▾</span></button>
+                  onClick={() => setLabelMenuOpen((open) => !open)}>{t("ラベルを選択")} <span aria-hidden="true">▾</span></button>
                 {labelMenuOpen && <div className="label-picker-menu" id="editor-label-options">
-                  <button type="button" className="create-label-button" onClick={() => setCreatingLabel((current) => !current)}>＋ 新規ラベルを作成</button>
+                  <button type="button" className="create-label-button" onClick={() => setCreatingLabel((current) => !current)}>{t("＋ 新規ラベルを作成")}</button>
                   {creatingLabel && <div className="new-label-row">
-                    <input aria-label="新しいラベル" placeholder="新しいラベル" value={newLabelName} maxLength={100}
+                    <input aria-label={t("新しいラベル")} placeholder={t("新しいラベル")} value={newLabelName} maxLength={100}
                       onChange={(event) => setNewLabelName(event.target.value)}
                       onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addNewLabel(); } }} />
-                    <button type="button" onClick={addNewLabel}>追加</button>
+                    <button type="button" onClick={addNewLabel}>{t("追加")}</button>
                   </div>}
                   <div className="label-options">
                     {labelOptions.map((name) => <label key={labelKey(name)}>
@@ -1761,72 +1780,72 @@ export default function App() {
               </div>
               {selectedLabels.length > 0 && <div className="selected-labels">
                 {selectedLabels.map((name) => <span className="selected-label" key={labelKey(name)}>{name}
-                  <button type="button" aria-label={`${name}を解除`} onClick={() => toggleLabel(name)}>×</button>
+                  <button type="button" aria-label={t("{0}を解除", { 0: name })} onClick={() => toggleLabel(name)}>×</button>
                 </span>)}
               </div>}
             </section>
             <label>URL<input type="url" value={draft.url} maxLength={2000} placeholder="https://" onChange={(event) => setDraft({ ...draft, url: event.target.value })} /></label>
             <div className="editor-options">
-              <label className="editor-color">色<select aria-label="メモの色" value={draft.color} onChange={(event) => setDraft({ ...draft, color: event.target.value as NoteColor })}>
+              <label className="editor-color">{t("色")}<select aria-label={t("メモの色")} value={draft.color} onChange={(event) => setDraft({ ...draft, color: event.target.value as NoteColor })}>
               {NOTE_COLORS.map((color) => <option value={color} key={color}>{COLOR_LABELS[color]}</option>)}
             </select></label>
-              <label><input type="checkbox" checked={draft.pinned} onChange={(event) => setDraft({ ...draft, pinned: event.target.checked })} /> ピン留め</label>
-              <label><input type="checkbox" checked={draft.archived} onChange={(event) => setDraft({ ...draft, archived: event.target.checked })} /> アーカイブ</label>
+              <label><input type="checkbox" checked={draft.pinned} onChange={(event) => setDraft({ ...draft, pinned: event.target.checked })} /> {t("ピン留め")}</label>
+              <label><input type="checkbox" checked={draft.archived} onChange={(event) => setDraft({ ...draft, archived: event.target.checked })} /> {t("アーカイブ")}</label>
             </div>
-            <section className="image-section" aria-label="添付ファイル">
-              <strong>画像を追加</strong>
+            <section className="image-section" aria-label={t("添付ファイル")}>
+              <strong>{t("画像を追加")}</strong>
               <div className={`image-dropzone${draggingImage ? " dragging" : ""}`}
                 onDragEnter={(event) => { if (Array.from(event.dataTransfer.types).includes("Files")) { event.preventDefault(); setDraggingImage(true); } }}
                 onDragOver={(event) => { if (Array.from(event.dataTransfer.types).includes("Files")) { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; setDraggingImage(true); } }}
                 onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDraggingImage(false); }}
                 onDrop={dropImages}>
-                <label className="upload-label">ファイルを選択
+                <label className="upload-label">{t("ファイルを選択")}
                   <input type="file" accept={IMAGE_TYPES.join(",")} multiple onChange={addImages} disabled={working} />
                 </label>
-                <span className="image-hint">Ctrl+Vで貼り付け / ここへドラッグ＆ドロップ</span>
+                <span className="image-hint">{t("Ctrl+Vで貼り付け / ここへドラッグ＆ドロップ")}</span>
               </div>
               {(editorAttachments.length > 0 || editorPreviewImage) && <>
-                <small className="image-group-label">保存済み</small>
-                <div className="card-image-choice" role="group" aria-label="カードに表示する画像">
-                  <span>カードに表示する画像</span>
+                <small className="image-group-label">{t("保存済み")}</small>
+                <div className="card-image-choice" role="group" aria-label={t("カードに表示する画像")}>
+                  <span>{t("カードに表示する画像")}</span>
                   <label><input type="radio" name="card-image" value="auto" checked={(draft.card_image ?? "auto") === "auto"} disabled={working}
-                    onChange={() => setDraft({ ...draft, card_image: "auto" })} />自動</label>
+                    onChange={() => setDraft({ ...draft, card_image: "auto" })} />{t("自動")}</label>
                 </div>
                 <div className="editor-images">
                     {editorAttachments.map((attachment) => (
                       <div className="editor-image" key={attachment.id}>
                         {IMAGE_TYPES.includes(attachment.mime_type)
-                          ? <button type="button" className="image-thumbnail" aria-label={`${attachment.filename}を拡大表示`} onClick={() => setViewerImageId(attachment.id)}><img src={attachment.url} alt={attachment.filename} loading="lazy" /></button>
+                          ? <button type="button" className="image-thumbnail" aria-label={t("{0}を拡大表示", { 0: attachment.filename })} onClick={() => setViewerImageId(attachment.id)}><img src={attachment.url} alt={attachment.filename} loading="lazy" /></button>
                           : <a href={attachment.url} download={attachment.filename}>{attachment.filename}</a>}
-                        <button type="button" onClick={() => removeImage(attachment)} disabled={working} aria-label={`${attachment.filename}を削除`}>削除</button>
+                        <button type="button" onClick={() => removeImage(attachment)} disabled={working} aria-label={t("{0}を削除", { 0: attachment.filename })}>{t("削除")}</button>
                         {IMAGE_TYPES.includes(attachment.mime_type) && <label className="card-image-radio">
                           <input type="radio" name="card-image" value={`attachment:${attachment.id}`} checked={draft.card_image === `attachment:${attachment.id}`} disabled={working}
-                            aria-label={`${attachment.filename}をカードに表示`} onChange={() => setDraft({ ...draft, card_image: `attachment:${attachment.id}` })} />カード表示
+                            aria-label={t("{0}をカードに表示", { 0: attachment.filename })} onChange={() => setDraft({ ...draft, card_image: `attachment:${attachment.id}` })} />{t("カード表示")}
                         </label>}
                       </div>
                     ))}
                     {editorPreviewImage && <div className="editor-image">
-                      <button type="button" className="image-thumbnail" aria-label="サムネイルを拡大表示" onClick={() => setViewerImageId("link-preview")}><img src={editorPreviewImage} alt="リンクサムネイル" loading="lazy" referrerPolicy="no-referrer" /></button>
-                      <small className="image-group-label">サムネイル</small>
+                      <button type="button" className="image-thumbnail" aria-label={t("サムネイルを拡大表示")} onClick={() => setViewerImageId("link-preview")}><img src={editorPreviewImage} alt={t("リンクサムネイル")} loading="lazy" referrerPolicy="no-referrer" /></button>
+                      <small className="image-group-label">{t("サムネイル")}</small>
                       <label className="card-image-radio"><input type="radio" name="card-image" value="preview" checked={draft.card_image === "preview"} disabled={working}
-                        aria-label="サムネイルをカードに表示" onChange={() => setDraft({ ...draft, card_image: "preview" })} />カード表示</label>
+                        aria-label={t("サムネイルをカードに表示")} onChange={() => setDraft({ ...draft, card_image: "preview" })} />{t("カード表示")}</label>
                     </div>}
                 </div>
               </>}
               {pendingImages.length > 0 && <>
-                <small className="image-group-label">追加予定</small>
+                <small className="image-group-label">{t("追加予定")}</small>
                 <div className="editor-images">
                   {pendingImages.map((image) => <div className="editor-image" key={image.id}>
                     <img src={image.previewUrl} alt={image.file.name} />
                     <span className="pending-image-name" title={image.file.name}>{image.file.name}</span>
-                    <button type="button" onClick={() => removePendingImage(image.id)} disabled={working} aria-label={`${image.file.name}を取り消す`}>取り消す</button>
+                    <button type="button" onClick={() => removePendingImage(image.id)} disabled={working} aria-label={t("{0}を取り消す", { 0: image.file.name })}>{t("取り消す")}</button>
                   </div>)}
                 </div>
               </>}
             </section>
             <div className="editor-actions">
-              {editingId && <button type="button" className="danger" onClick={remove} disabled={working}>ゴミ箱へ</button>}
-              <button type="submit" className="primary" disabled={working || !(editingId || draft.title.trim() || draft.body.trim() || draft.url.trim() || draft.checklist.length || pendingImages.length)}>{working ? "保存中…" : "保存"}</button>
+              {editingId && <button type="button" className="danger" onClick={remove} disabled={working}>{t("ゴミ箱へ")}</button>}
+              <button type="submit" className="primary" disabled={working || !(editingId || draft.title.trim() || draft.body.trim() || draft.url.trim() || draft.checklist.length || pendingImages.length)}>{working ? t("保存中…") : t("保存")}</button>
             </div>
           </form>
         </div>

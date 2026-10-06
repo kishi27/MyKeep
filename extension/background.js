@@ -32,7 +32,7 @@ async function closeOwnedTab() {
     // A user may already have closed this task's tab. Never search for other tabs.
     let existing;
     try { existing = await chrome.tabs.get(id); } catch { /* Already closed. */ }
-    if (existing) throw new Error("作業タブを閉じられません。タブを閉じてから再開してください。");
+    if (existing) throw new Error("repair.error.closeTab");
   }
   session.tabId = null;
   await saveSession();
@@ -58,7 +58,7 @@ function scheduleNext() {
 
 async function pauseWithError() {
   state.status = "paused";
-  state.error = "処理を一時停止しました。API設定・接続・作業タブを確認して再開してください。";
+  state.error = "repair.error.paused";
   await disarm();
   await persist();
 }
@@ -72,7 +72,7 @@ const ready = (async () => {
   // session storage survives worker suspension but is cleared on browser restart.
   if (state.status === "running" && session.runId !== state.runId) state.status = "paused";
   try { await closeOwnedTab(); }
-  catch { state.status = "paused"; state.error = "前回の作業タブを閉じてから再開してください。"; }
+  catch { state.status = "paused"; state.error = "repair.error.closePreviousTab"; }
   state.currentNoteId = null;
   await persist();
   if (state.status === "running") await arm();
@@ -332,7 +332,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (sender.id !== chrome.runtime.id || message?.type !== "thumbnail-repair") return;
   commands = commands.catch(() => {}).then(() => command(message.action));
   void commands.then(result => respond({ ok: true, ...result }), error => respond({ ok: false,
-    error: error.message === "api_update_failed" ? "APIへの接続を確認してください。" : error.message }));
+    error: error.message === "api_update_failed" ? "repair.error.apiConnection" : error.message }));
   return true;
 });
 chrome.alarms.onAlarm.addListener(alarm => {

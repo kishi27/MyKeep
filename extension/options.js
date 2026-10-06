@@ -1,4 +1,5 @@
 import { captureEndpoint, hostPermissionPattern } from "./shared.js";
+import { getLanguage, initializeI18n, localizeError, onLanguageChange, t } from "./i18n.js";
 
 const form = document.getElementById("optionsForm");
 const apiUrl = document.getElementById("apiUrl");
@@ -12,18 +13,41 @@ const repairButtons = Object.fromEntries(["Check", "Start", "Pause", "Resume", "
 let repairState = { status: "idle", failures: [] };
 let repairRequestPending = false;
 let configured = false;
+let statusMessage = "";
+let statusIsError = false;
+let repairCountValue = null;
+let repairCommandError = "";
 
 function showStatus(message, error = false) {
-  status.textContent = message;
-  status.classList.toggle("error", error);
+  statusMessage = message;
+  statusIsError = error;
+  renderStatus();
 }
 
-chrome.storage.local.get(["apiUrl", "apiKey"]).then((settings) => {
-  apiUrl.value = settings.apiUrl ?? "";
-  apiKey.value = settings.apiKey ?? "";
-  configured = Boolean(settings.apiUrl && settings.apiKey);
-  renderRepair();
-}).catch(() => showStatus("設定を読み込めませんでした。", true));
+function renderStatus() {
+  status.textContent = !statusMessage ? "" : statusIsError
+    ? localizeError(statusMessage, "options.settingsSaveFailed")
+    : t(statusMessage);
+  status.classList.toggle("error", statusIsError);
+}
+
+function renderRepairCount() {
+  repairCount.textContent = repairCountValue === null
+    ? t("repair.countUnknown")
+    : t("repair.count", { count: new Intl.NumberFormat(getLanguage() === "en" ? "en-US" : "ja-JP").format(repairCountValue) });
+}
+
+async function loadSettings() {
+  try {
+    const settings = await chrome.storage.local.get(["apiUrl", "apiKey"]);
+    apiUrl.value = settings.apiUrl ?? "";
+    apiKey.value = settings.apiKey ?? "";
+    configured = Boolean(settings.apiUrl && settings.apiKey);
+    renderRepair();
+  } catch {
+    showStatus("options.settingsLoadFailed", true);
+  }
+}
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -31,15 +55,15 @@ form.addEventListener("submit", async (event) => {
   try {
     const endpoint = captureEndpoint(apiUrl.value);
     const key = apiKey.value.trim();
-    if (!key) throw new Error("API KEYを入力してください。");
+    if (!key) throw new Error("options.apiKeyRequired");
     const granted = await chrome.permissions.request({ origins: [hostPermissionPattern(endpoint)] });
-    if (!granted) throw new Error("API URLへの接続許可が必要です。");
+    if (!granted) throw new Error("options.apiPermissionRequired");
     await chrome.storage.local.set({ apiUrl: endpoint, apiKey: key });
     configured = true;
     renderRepair();
-    showStatus("設定を保存しました。");
+    showStatus("options.settingsSaved");
   } catch (error) {
-    showStatus(error instanceof Error ? error.message : "設定を保存できませんでした。", true);
+    showStatus(error instanceof Error ? error.message : "options.settingsSaveFailed", true);
   }
 });
 
@@ -58,11 +82,23 @@ function renderRepair() {
   repairButtons.resume.disabled ||= finishing;
   repairButtons.retry.disabled ||= finishing;
   repairButtons.check.disabled ||= running;
-  const names = { idle: "", running: "処理中", paused: "一時停止", cancelled: "中止しました", completed: "処理完了" };
+  const stateKey = `repair.status.${repairState.status}`;
+  const formatter = new Intl.NumberFormat(getLanguage() === "en" ? "en-US" : "ja-JP");
   repairProgress.textContent = repairState.status === "idle" ? "" :
-    `${names[repairState.status] ?? ""}：${repairState.processed ?? 0} / ${repairState.total ?? 0}\n成功：${repairState.success ?? 0}　失敗：${repairState.failed ?? 0}${finishing ? "\n現在の1件を終了しています。" : ""}`;
-  repairStatus.textContent = !configured ? "先にAPI URLとAPI KEYを設定してください。" : repairState.error || "";
-  repairStatus.classList.toggle("error", Boolean(repairState.error));
+    t("repair.progress", {
+      state: t(stateKey),
+      processed: formatter.format(repairState.processed ?? 0),
+      total: formatter.format(repairState.total ?? 0),
+      success: formatter.format(repairState.success ?? 0),
+      failed: formatter.format(repairState.failed ?? 0),
+      finishing: finishing ? t("repair.finishing") : "",
+    });
+  renderRepairCount();
+  const repairError = repairCommandError || repairState.error;
+  repairStatus.textContent = !configured ? t("repair.notConfigured") : repairError
+    ? localizeError(repairError, "repair.error.generic")
+    : "";
+  repairStatus.classList.toggle("error", Boolean(repairCommandError || repairState.error));
 }
 
 async function repairCommand(action) {
@@ -73,20 +109,20 @@ async function repairCommand(action) {
     if (["start", "resume", "retry"].includes(action)) {
       // Only explicit repair actions request broad access; ordinary capture stays activeTab-based.
       const granted = await chrome.permissions.request({ origins: ["https://*/*", "http://*/*"] });
-      if (!granted) throw new Error("サムネイル補完にはサイトへのアクセス許可が必要です。");
+      if (!granted) throw new Error("repair.sitePermissionRequired");
     }
     const result = await chrome.runtime.sendMessage({ type: "thumbnail-repair", action });
-    if (!result?.ok) throw new Error(result?.error || "処理を開始できませんでした。");
+    if (!result?.ok) throw new Error(result?.error || "repair.startFailed");
     if (result.state) repairState = result.state;
-    if (action === "clear") repairCount.textContent = "未取得件数：未確認";
-    if (Number.isSafeInteger(result.count)) repairCount.textContent = `未取得件数：${result.count}件`;
+    repairCommandError = "";
+    if (action === "clear") repairCountValue = null;
+    if (Number.isSafeInteger(result.count)) repairCountValue = result.count;
     repairRequestPending = false;
     renderRepair();
   } catch (error) {
     repairRequestPending = false;
+    repairCommandError = error instanceof Error ? error.message : "repair.checkFailed";
     renderRepair();
-    repairStatus.textContent = error instanceof Error ? error.message : "処理を確認できませんでした。";
-    repairStatus.classList.add("error");
   }
 }
 
@@ -98,7 +134,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
   if (changes.thumbnailRepairState) {
     repairState = changes.thumbnailRepairState.newValue ?? { status: "idle", failures: [] };
-    if (repairState.status === "idle") repairCount.textContent = "未取得件数：未確認";
+    repairCommandError = "";
+    if (repairState.status === "idle") repairCountValue = null;
   }
   if (changes.apiUrl || changes.apiKey) {
     void chrome.storage.local.get(["apiUrl", "apiKey"]).then(config => {
@@ -111,5 +148,13 @@ renderRepair();
 void chrome.runtime.sendMessage({ type: "thumbnail-repair", action: "state" }).then(result => {
   if (result?.ok && result.state) { repairState = result.state; renderRepair(); }
 }).catch(() => {
-  repairStatus.textContent = "拡張を再読み込みしてから設定を開き直してください。";
+  repairCommandError = "repair.extensionReload";
+  renderRepair();
 });
+
+onLanguageChange(() => {
+  renderStatus();
+  renderRepair();
+});
+await initializeI18n();
+void loadSettings();
