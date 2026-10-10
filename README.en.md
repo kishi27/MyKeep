@@ -199,6 +199,20 @@ Normal saves use ``activeTab`` to fetch the current page’s Open Graph / Twitte
 
 After saving, “Open in MyKeep” opens the note in a new tab. You must sign in to Cloudflare Access for the web app.
 
+## Share from iPhone Safari
+
+Use an iOS shortcut to save a Safari page’s title and URL.
+
+1. Create a shortcut, enable “Show in Share Sheet,” and accept Safari web pages or URLs.
+2. Use “Get URLs from Input” with the Shortcut Input to extract the shared URL. Use the shared page’s name as the title, or enter a title with “Ask for Input.”
+3. Add “Get Contents of URL,” set the destination to `https://<your-worker>/api/capture`, and choose **POST**.
+4. Add the `Authorization` header with `Bearer <CAPTURE_API_KEY>`. Include a space after `Bearer` and use the same key as the Worker Secret.
+5. Choose **Form** as the request body. Add text fields named `title` (up to 300 characters) and `url` (the shared http / https URL, up to 2000 characters). The `title` field is required but may be empty. Add “Show Result” to see the response.
+
+Run the shortcut from Safari’s Share menu and allow it to connect to your MyKeep host on first use. Let Shortcuts set Content-Type. The API accepts both `application/x-www-form-urlencoded` and `multipart/form-data`, not JSON. Images still require multipart.
+
+Use the existing Access Bypass for `/api/capture` only. Keep shortcuts containing your API key private: the key grants access to the capture API independently of the web app’s Access login.
+
 ## Google Keep Import
 
 1. Download a Google Keep ZIP through Google Takeout.

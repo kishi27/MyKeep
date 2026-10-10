@@ -199,6 +199,20 @@ API URL / API KEYは `chrome.storage.local` に保存されます。HTTPSが必�
 
 保存後の「MyKeepで表示」は対象メモを新しいタブで開きます。Web側のCloudflare Accessログインは必要です。
 
+## iPhone Safariから共有保存
+
+iOSの「ショートカット」から、Safariで開いているページのタイトル・URLを保存できます。
+
+1. 新しいショートカットを作り、詳細で「共有シートに表示」を有効にします。受け取る種類はSafariのWebページ／URLにします。
+2. 「入力からURLを取得」で「ショートカットの入力」から共有ページのURLを取り出します。タイトルは共有ページの名前を使うか、「入力を要求」で入力します。
+3. 「URLの内容を取得」を追加し、送信先を `https://<your-worker>/api/capture`、方法を **POST** にします。
+4. ヘッダーへ `Authorization` を追加し、値を `Bearer <CAPTURE_API_KEY>` にします。`Bearer`の後には半角スペースを入れ、Worker Secretと同じキーを使います。
+5. 要求本文は **フォーム** を選び、テキスト項目 `title`（タイトル・最大300文字）と `url`（共有ページのhttp / https URL・最大2000文字）を設定します。`title`は空文字でも構いませんが、項目自体は必要です。最後に「結果を表示」を追加すると保存結果を確認できます。
+
+Safariの共有メニューからこのショートカットを選び、最初の実行時に自分のMyKeepへの接続を許可します。Content-Typeはショートカットに任せてください。APIは `application/x-www-form-urlencoded` と `multipart/form-data` の両方に対応し、JSON形式は受け付けません。画像を送る場合は従来のmultipart形式を使用します。
+
+`/api/capture`だけをAccessのBypass対象にする既存設定を使います。API KEYを含むショートカットは公開・共有しないでください。ショートカットのAPI KEYには、Web本体のAccessログインとは別に保存APIへのアクセス権があります。
+
 ## Google Keep Import
 
 1. Google TakeoutからGoogle KeepのZIPを取得します。

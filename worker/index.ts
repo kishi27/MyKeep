@@ -874,7 +874,8 @@ function capturePreview(form: FormData, url: string): NotePreview {
 
 async function captureNote(request: Request, env: Env): Promise<Response> {
   const contentType = request.headers.get("Content-Type") ?? "";
-  if (!contentType.toLowerCase().startsWith("multipart/form-data;")) {
+  const mediaType = contentType.split(";", 1)[0].trim().toLowerCase();
+  if (mediaType !== "multipart/form-data" && mediaType !== "application/x-www-form-urlencoded") {
     return json({ error: "送信形式が正しくありません。" }, 415);
   }
   const contentLength = Number(request.headers.get("Content-Length") ?? "0");
