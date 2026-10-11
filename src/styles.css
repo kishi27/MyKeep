@@ -119,8 +119,9 @@ button.card-content:hover { background: #ffffff70; }
 .label-manager-list { display: grid; gap: 2px; max-height: 50vh; overflow-y: auto; }
 .label-manager-list label { display: flex; align-items: center; gap: 10px; padding: 7px 4px; overflow-wrap: anywhere; }
 .label-manager-list input { width: 18px; height: 18px; flex: 0 0 auto; }
-.label-manager-row { display: flex; align-items: center; gap: 8px; }
+.label-manager-row { display: grid; grid-template-columns: minmax(0, 1fr) clamp(100px, 35%, 180px) auto; align-items: center; gap: 8px; }
 .label-manager-row label { flex: 1; min-width: 0; }
+.label-manager-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .label-manager-row > button, .label-rename-row button { flex-shrink: 0; border: 1px solid #cecec8; border-radius: 7px; background: white; color: inherit; padding: 6px 10px; }
 .label-rename-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 0 8px; }
 .label-rename-row input { flex: 1 1 100px; min-width: 0; width: 100%; height: auto; border: 1px solid #cecec8; border-radius: 7px; padding: 7px 9px; background: white; color: inherit; }
@@ -131,8 +132,15 @@ button.card-content:hover { background: #ffffff70; }
 .group-manager-row { display: flex; align-items: center; gap: 6px; }
 .group-manager-row > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .group-manager-row button { flex-shrink: 0; padding: 6px 10px; border: 1px solid #cecec8; border-radius: 7px; background: white; color: inherit; }
-.label-manager-list .label-membership { flex-wrap: wrap; gap: 6px; font-size: .8rem; padding-top: 0; }
-.label-membership select { flex: 1; min-width: 0; max-width: 100%; border: 1px solid #cecec8; border-radius: 6px; background: white; color: inherit; padding: 7px; }
+.label-membership, .label-group-bulk select { min-width: 0; width: 100%; border: 1px solid #cecec8; border-radius: 6px; background: white; color: inherit; padding: 7px; }
+.label-manager-modal { width: min(100%, 680px); display: flex; flex-direction: column; overflow: hidden; }
+.label-manager-modal > .editor-heading, .label-manager-footer { flex-shrink: 0; }
+.label-manager-content { min-height: 0; overflow-y: auto; display: grid; gap: 12px; }
+.label-manager-modal .label-manager-list { max-height: none; overflow: visible; }
+.label-manager-footer { display: grid; gap: 10px; border-top: 1px solid #deded8; padding-top: 12px; }
+.label-group-bulk { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+.label-group-bulk label { flex: 1 1 160px; min-width: 0; display: grid; gap: 5px; font-size: .85rem; }
+.label-move-button { border: 1px solid #f4c84c; border-radius: 8px; background: #f4c84c; color: #242424; padding: 9px 12px; }
 .label-manager-actions button { border-radius: 8px; padding: 9px 12px; }
 .label-cancel-button { border: 1px solid #cecec8; background: white; color: #242424; }
 .label-delete-button { border: 1px solid #a52f2f; background: #a52f2f; color: white; }
@@ -269,6 +277,8 @@ h2 { margin: 0; font-size: 1.15rem; }
   .brand h1 { font-size: 1.15rem; }
   .menu-toggle { padding: 7px; }
   .icon-button { width: 36px; }
+  .label-manager-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .label-manager-row .label-membership { grid-column: 1 / -1; grid-row: 2; }
 }
 
 :root[data-theme="dark"] { color-scheme: dark; color: #eeeae0; background: #18191b; }
@@ -292,7 +302,8 @@ h2 { margin: 0; font-size: 1.15rem; }
 :root[data-theme="dark"] .label-cancel-button { background: #303237; border-color: #63666a; color: #eeeae0; }
 :root[data-theme="dark"] .label-manager-row > button, :root[data-theme="dark"] .label-rename-row button:not(.primary), :root[data-theme="dark"] .label-rename-row input { background: #303237; border-color: #63666a; color: #eeeae0; }
 :root[data-theme="dark"] .label-delete-button { background: #963735; border-color: #c35b58; color: white; }
-:root[data-theme="dark"] .group-manager-row button, :root[data-theme="dark"] .label-membership select { background: #303237; border-color: #63666a; color: #eeeae0; }
+:root[data-theme="dark"] .group-manager-row button, :root[data-theme="dark"] .label-membership, :root[data-theme="dark"] .label-group-bulk select { background: #303237; border-color: #63666a; color: #eeeae0; }
+:root[data-theme="dark"] .label-manager-footer { border-color: #55595d; }
 :root[data-theme="dark"] .label-group-divider { border-color: #55595d; }
 :root[data-theme="dark"] .settings-dropdown button:hover { background: #373a3e; }
 :root[data-theme="dark"] .card, :root[data-theme="dark"] .editor { --note-bg: #2c2e31; border-color: #55565a; }

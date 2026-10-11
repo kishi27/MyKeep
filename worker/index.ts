@@ -484,6 +484,49 @@ async function assignLabelGroup(request: Request, env: Env): Promise<Response> {
   return json({ name: label.name, group_id: groupId });
 }
 
+async function assignLabelGroups(request: Request, env: Env): Promise<Response> {
+  const value = await readInput(request, 20_000);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return json({ error: "ラベルの指定が正しくありません。" }, 400);
+  }
+  const input = value as Record<string, unknown>;
+  if (Object.keys(input).length !== 2 || !Object.hasOwn(input, "labels") || !Object.hasOwn(input, "group_id")) {
+    return json({ error: "ラベルの指定が正しくありません。" }, 400);
+  }
+  if (!Array.isArray(input.labels) || !input.labels.length || input.labels.length > MAX_LABELS) {
+    return json({ error: "移動するラベルを1〜50件指定してください。" }, 400);
+  }
+  const groupId = input.group_id;
+  if (groupId !== null && !isStrictUuid(groupId)) return json({ error: "グループの指定が正しくありません。" }, 400);
+  const keys: string[] = [];
+  for (const value of input.labels) {
+    if (typeof value !== "string") return json({ error: "ラベルの指定が正しくありません。" }, 400);
+    const name = value.trim().normalize("NFC");
+    const key = labelKey(name);
+    if (!name || name.length > 100 || keys.includes(key)) return json({ error: "ラベルの指定が正しくありません。" }, 400);
+    keys.push(key);
+  }
+  if (groupId !== null && !await env.DB.prepare("SELECT id FROM label_groups WHERE id = ?").bind(groupId).first()) {
+    return json({ error: "グループが見つかりません。" }, 404);
+  }
+  try {
+    // One atomic statement; a missing label prevents every update in this request.
+    const result = await env.DB.prepare(`
+      WITH selected AS (SELECT name_key FROM labels WHERE name_key IN (${keys.map(() => "?").join(",")}))
+      UPDATE labels SET group_id = ?
+      WHERE name_key IN (SELECT name_key FROM selected) AND (SELECT COUNT(*) FROM selected) = ?
+      RETURNING name, group_id
+    `).bind(...keys, groupId, keys.length).all<LabelDetailRow>();
+    if (result.results.length !== keys.length) return json({ error: "ラベルが見つかりません。" }, 404);
+    return json({ labels: result.results, moved: result.results.length });
+  } catch (error) {
+    if (groupId !== null && error instanceof Error && /foreign key constraint failed/i.test(error.message)) {
+      return json({ error: "グループが見つかりません。" }, 404);
+    }
+    throw error;
+  }
+}
+
 async function createLabel(request: Request, env: Env): Promise<Response> {
   const value = await readInput(request, 20_000);
   if (!value || typeof value !== "object" || Array.isArray(value)) return json({ error: "ラベル名を確認してください。" }, 400);
@@ -1167,6 +1210,10 @@ export default {
 
       if (url.pathname === "/api/labels/group" && request.method === "PATCH") {
         return await assignLabelGroup(request, env);
+      }
+
+      if (url.pathname === "/api/labels/group/batch" && request.method === "PATCH") {
+        return await assignLabelGroups(request, env);
       }
 
       if (url.pathname === "/api/label-groups") {

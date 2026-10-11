@@ -394,6 +394,7 @@ function MyKeep() {
   const [renamingLabel, setRenamingLabel] = useState(false);
   const [renameError, setRenameError] = useState("");
   const renamingLabelRef = useRef(false);
+  const labelRenameInputRef = useRef<HTMLInputElement>(null);
   const [newGroupName, setNewGroupName] = useState("");
   const [editingGroup, setEditingGroup] = useState<string | null>(null);
   const [groupRenameName, setGroupRenameName] = useState("");
@@ -401,6 +402,16 @@ function MyKeep() {
   const [groupBusy, setGroupBusy] = useState(false);
   const groupBusyRef = useRef(false);
   const [groupError, setGroupError] = useState("");
+  const groupRenameInputRef = useRef<HTMLInputElement>(null);
+  const [destinationGroup, setDestinationGroup] = useState("");
+  const [movedLabelCount, setMovedLabelCount] = useState<number | null>(null);
+  useEffect(() => {
+    const input = editingLabel ? labelRenameInputRef.current : editingGroup ? groupRenameInputRef.current : null;
+    if (input) {
+      input.focus({ preventScroll: true });
+      input.scrollIntoView({ block: "nearest" });
+    }
+  }, [editingLabel, editingGroup]);
   const [importOpen, setImportOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [richLinkPreview, setRichLinkPreview] = useState(() => savedSetting(PREVIEW_SETTING, true));
@@ -877,6 +888,8 @@ function MyKeep() {
     setGroupDeleteId(null);
     setNewGroupName("");
     setGroupError("");
+    setDestinationGroup("");
+    setMovedLabelCount(null);
   }
 
   function openLabelManager() {
@@ -887,6 +900,8 @@ function MyKeep() {
     setEditingGroup(null);
     setGroupDeleteId(null);
     setGroupError("");
+    setDestinationGroup("");
+    setMovedLabelCount(null);
     setLabelManagerOpen(true);
     setMenuOpen(false);
   }
@@ -904,6 +919,7 @@ function MyKeep() {
     groupBusyRef.current = true;
     setGroupBusy(true);
     setGroupError("");
+    setMovedLabelCount(null);
     try {
       if (action === "move") {
         const detail = await api<LabelDetail>("/api/labels/group", { method: "PATCH", body: JSON.stringify({ name, group_id: id }) });
@@ -912,6 +928,7 @@ function MyKeep() {
         await api(`/api/label-groups/${id}`, { method: "DELETE" });
         setLabelGroups((current) => current.filter((group) => group.id !== id));
         setLabelDetails((current) => current.map((item) => item.group_id === id ? { ...item, group_id: null } : item));
+        setDestinationGroup((current) => current === id ? "" : current);
         setGroupDeleteId(null);
       } else {
         const normalized = normalizedLabelName(name);
@@ -936,6 +953,30 @@ function MyKeep() {
     setEditingLabel(null);
     setRenameName("");
     setRenameError("");
+  }
+
+  async function moveSelectedLabels() {
+    const names = availableLabels.filter((name) => labelsToDelete.includes(labelKey(name)));
+    if (!names.length || groupBusyRef.current || labelManagerBusy || editingLabel !== null || editingGroup !== null) return;
+    groupBusyRef.current = true;
+    setGroupBusy(true);
+    setGroupError("");
+    setMovedLabelCount(null);
+    try {
+      const result = await api<{ labels: LabelDetail[]; moved: number }>("/api/labels/group/batch", {
+        method: "PATCH", body: JSON.stringify({ labels: names, group_id: destinationGroup || null }),
+      });
+      const moved = new Map(result.labels.map((detail) => [labelKey(detail.name), detail]));
+      setLabelDetails((current) => current.map((detail) => moved.get(labelKey(detail.name)) ?? detail));
+      setLabelsToDelete([]);
+      setMovedLabelCount(result.moved);
+      reloadList();
+    } catch (cause) {
+      setGroupError(cause instanceof Error ? cause.message : "ラベルを移動できませんでした。");
+    } finally {
+      groupBusyRef.current = false;
+      setGroupBusy(false);
+    }
   }
 
   async function renameLabel() {
@@ -979,6 +1020,7 @@ function MyKeep() {
   }
 
   function toggleLabelToDelete(name: string) {
+    setMovedLabelCount(null);
     const key = labelKey(name);
     setLabelsToDelete((current) => current.includes(key)
       ? current.filter((selected) => selected !== key)
@@ -1770,8 +1812,9 @@ function MyKeep() {
       </div>}
 
       {labelManagerOpen && <div className="overlay" onMouseDown={(event) => { if (event.target === event.currentTarget && !labelManagerBusy) closeLabelManager(); }}>
-        <section className="utility-modal" role="dialog" aria-modal="true" aria-label={t("ラベル整理")}>
+        <section className="utility-modal label-manager-modal" role="dialog" aria-modal="true" aria-label={t("ラベル整理")}>
           <div className="editor-heading"><h2>{t("ラベル整理")}</h2><button type="button" className="close" aria-label={t("閉じる")} onClick={closeLabelManager} disabled={labelManagerBusy}>×</button></div>
+          <div className="label-manager-content">
           {!labelDeleteConfirm && !groupDeleteId && <>
             <section className="group-manager" aria-label={t("ラベルグループ")}>
               <h3>{t("ラベルグループ")}</h3>
@@ -1793,7 +1836,7 @@ function MyKeep() {
                     onClick={() => { setGroupDeleteId(group.id); setGroupError(""); }}>{t("削除")}</button>
                 </div>
                 {editingGroup === group.id && <div className="label-rename-row">
-                  <input aria-label={t("変更後のグループ名")} value={groupRenameName} maxLength={100} disabled={labelManagerBusy}
+                  <input ref={groupRenameInputRef} aria-label={t("変更後のグループ名")} value={groupRenameName} maxLength={100} disabled={labelManagerBusy}
                     onChange={(event) => setGroupRenameName(event.target.value)}
                     onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); void changeGroup("rename", groupRenameName, group.id); } }} />
                   <button type="button" className="primary" disabled={labelManagerBusy || !groupRenameName.trim()} onClick={() => void changeGroup("rename", groupRenameName, group.id)}>{t("保存")}</button>
@@ -1816,22 +1859,20 @@ function MyKeep() {
               <div className="label-manager-row">
                 <label><input type="checkbox" checked={labelsToDelete.includes(labelKey(name))}
                   disabled={labelManagerBusy || editingGroup !== null || editingLabel !== null || (labelsToDelete.length >= 50 && !labelsToDelete.includes(labelKey(name)))}
-                  onChange={() => toggleLabelToDelete(name)} />{name}</label>
-                <button type="button" aria-label={t("{0}のラベル名を変更", { 0: name })} title={t("ラベル名を変更")}
-                  disabled={labelManagerBusy || editingGroup !== null || editingLabel !== null}
-                  onClick={() => { setEditingLabel(name); setRenameName(name); setRenameError(""); setLabelDeleteError(""); }}>✎</button>
-              </div>
-              <label className="label-membership">{t("所属グループ")}
-                <select aria-label={t("{0}の所属グループ", { 0: name })}
+                  onChange={() => toggleLabelToDelete(name)} /><span className="label-manager-name" title={name}>{name}</span></label>
+                <select className="label-membership" aria-label={t("{0}の所属グループ", { 0: name })}
                   value={labelDetails.find((item) => labelKey(item.name) === labelKey(name))?.group_id ?? ""}
                   disabled={labelManagerBusy || editingLabel !== null || editingGroup !== null}
                   onChange={(event) => void changeGroup("move", name, event.target.value || null)}>
                   <option value="">{t("グループなし")}</option>
                   {[...labelGroups].sort((a, b) => a.name.localeCompare(b.name, locale)).map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
                 </select>
-              </label>
+                <button type="button" aria-label={t("{0}のラベル名を変更", { 0: name })} title={t("ラベル名を変更")}
+                  disabled={labelManagerBusy || editingGroup !== null || editingLabel !== null}
+                  onClick={() => { setEditingLabel(name); setRenameName(name); setRenameError(""); setLabelDeleteError(""); }}>✎</button>
+              </div>
               {editingLabel === name && <div className="label-rename-row">
-                <input aria-label={t("変更後のラベル名")} value={renameName} maxLength={100} disabled={labelManagerBusy}
+                <input ref={labelRenameInputRef} aria-label={t("変更後のラベル名")} value={renameName} maxLength={100} disabled={labelManagerBusy}
                   onChange={(event) => setRenameName(event.target.value)}
                   onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); void renameLabel(); } }} />
                 <button type="button" className="primary" disabled={labelManagerBusy || !renameName.trim()} onClick={() => void renameLabel()}>{t("保存")}</button>
@@ -1840,14 +1881,32 @@ function MyKeep() {
             </div>} />
             {availableLabels.length === 0 && <p>{t("ラベルはありません。")}</p>}
           </div>}
+          </div>
+          <div className="label-manager-footer">
           {labelDeleteError && <p className="error" role="alert">{uiMessage(labelDeleteError)}</p>}
           {renameError && <p className="error" role="alert">{uiMessage(renameError)}</p>}
           {groupError && <p className="error" role="alert">{uiMessage(groupError)}</p>}
+          {movedLabelCount !== null && <p role="status">{t("{0}件のラベルを移動しました。", { 0: countFormat.format(movedLabelCount) })}</p>}
+          {!labelDeleteConfirm && !groupDeleteId && <>
+            <p>{t("{0}件選択中", { 0: countFormat.format(deleteLabelNames.length) })}</p>
+            <div className="label-group-bulk">
+              <label>{t("移動先グループ")}
+                <select aria-label={t("移動先グループ")} value={destinationGroup} disabled={labelManagerBusy || editingGroup !== null || editingLabel !== null}
+                  onChange={(event) => setDestinationGroup(event.target.value)}>
+                  <option value="">{t("グループなし")}</option>
+                  {[...labelGroups].sort((a, b) => a.name.localeCompare(b.name, locale)).map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
+                </select>
+              </label>
+              <button type="button" className="label-move-button" disabled={labelManagerBusy || editingGroup !== null || editingLabel !== null || !deleteLabelNames.length}
+                onClick={() => void moveSelectedLabels()}>{t("選択したラベルを移動")}</button>
+            </div>
+          </>}
           <div className="label-manager-actions">
             <button type="button" className="label-cancel-button" onClick={() => groupDeleteId ? setGroupDeleteId(null) : labelDeleteConfirm ? setLabelDeleteConfirm(false) : closeLabelManager()} disabled={labelManagerBusy}>{t("キャンセル")}</button>
             {groupDeleteId ? <button type="button" className="label-delete-button" disabled={labelManagerBusy} onClick={() => void changeGroup("delete", "", groupDeleteId)}>{t("グループを削除")}</button> : labelDeleteConfirm
               ? <button type="button" className="label-delete-button" onClick={() => { void deleteSelectedLabels(); }} disabled={labelManagerBusy || deleteLabelNames.length === 0}>{t("削除")}</button>
               : <button type="button" className="label-delete-button" onClick={() => { setLabelDeleteError(""); setLabelDeleteConfirm(true); }} disabled={labelManagerBusy || editingGroup !== null || editingLabel !== null || deleteLabelNames.length === 0}>{t("選択したラベルを削除")}</button>}
+          </div>
           </div>
         </section>
       </div>}
