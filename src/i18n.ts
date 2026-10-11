@@ -9,6 +9,17 @@ export function savedLanguage(): Language {
 
 // Japanese keys also serve as the original text for messages kept in component state.
 const english = {
+  "ラベルグループ": "Label groups", "新しいグループ名": "New group name", "グループを作成": "Create group",
+  "グループ名を変更": "Rename group", "変更後のグループ名": "New group name", "グループを削除": "Delete group",
+  "所属グループ": "Parent group", "グループなし": "No group", "{0}の所属グループ": "Parent group for {0}",
+  "{0}のグループ名を変更": "Rename group {0}", "{0}のグループを削除": "Delete group {0}",
+  "グループ「{0}」を削除しますか？": "Delete group “{0}”?",
+  "所属ラベルとメモは削除されません。ラベルはグループなしに戻ります。": "Labels and notes will not be deleted. Labels will return to No group.",
+  "グループ名は1〜100文字で入力してください。": "Enter a group name of 1–100 characters.",
+  "グループを更新できませんでした。": "Could not update the group.",
+  "同じ名前のグループが既に存在します。": "A group with that name already exists.",
+  "グループが見つかりません。": "Group not found.", "グループの指定が正しくありません。": "Invalid group.",
+  "ラベル一覧の応答が正しくありません。": "Invalid label list response.",
   "画像ビューア": "Image viewer", "元画像を開く": "Open original image", "画像ビューアを閉じる": "Close image viewer",
   "閉じる": "Close", "前の画像": "Previous image", "次の画像": "Next image", "← 前": "← Previous", "次 →": "Next →",
   "📌 ピン留め": "📌 Pinned", "📦 アーカイブ": "📦 Archived", "📎 添付ファイル {0}件": "📎 Attachments: {0}",

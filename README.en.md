@@ -35,9 +35,9 @@ Save the current page to MyKeep. The screenshot shows the older UI; the extensio
 - **Links**: Rich link previews can show a title, description, domain, and image. MyKeep falls back to a plain link when preview information cannot be fetched.
 - **Bulk actions**: Select individual notes, select all, or clear the selection. Archive, return notes to the main list, move them to Trash, restore or permanently delete them, add or remove labels, and undo supported actions.
 - **Trash**: Restore or permanently delete notes, see the time remaining before permanent deletion, empty all of Trash, and automatically delete notes after seven days.
-- **Label management**: Create, rename, and delete multiple labels. A label page includes regular and archived notes.
+- **Label management**: Create, rename, and delete labels, and organize them under non-nested groups. A label page includes regular and archived notes.
 - **Settings**: Configure rich link previews, whether note cards show titles and text, dark mode, and periodic refresh while MyKeep is visible.
-- **Chrome extension**: Save the current page’s title, URL, note, labels, and image. Edit the title and pin the note before saving, fetch Open Graph / Twitter Card data, open saved notes in MyKeep, and repair thumbnails in bulk.
+- **Chrome extension**: Save the current page’s title, URL, note, grouped labels, and image. Edit the title and pin the note before saving, fetch Open Graph / Twitter Card data, open saved notes in MyKeep, and repair thumbnails in bulk.
 - **Migration and backup**: Import a Google Keep Takeout ZIP. Export JSON, Markdown, and attachments together in a ZIP.
 - **PWA**: Open MyKeep from the home screen or as an app on iPhone, Android, and desktop. An internet connection is required.
 
@@ -117,7 +117,7 @@ Before saving personal data, confirm that Access protects the site and that requ
 
 The current setup is **push or merge to ``main`` on the connected GitHub repository → Cloudflare Workers Builds → automatic deployment**. For a fork, the trigger is **the ``main`` branch of your own fork**. Connect your fork in Cloudflare and set the build command to ``npm run build`` and the deploy command to ``npx wrangler deploy``.
 
-``npm run deploy`` is for manual deployment and includes a build. **D1 migrations are not applied automatically by a push or by either deployment command.** When a new migration is added, run ``npx wrangler d1 migrations apply mykeep --remote`` again before deploying the code that depends on it.
+``npm run deploy`` is for manual deployment and includes a build. **D1 migrations are not applied automatically by a push or by either deployment command.** When a new migration is added, run ``npx wrangler d1 migrations apply mykeep --local`` and ``npx wrangler d1 migrations apply mykeep --remote`` before pushing or merging to ``main`` starts automatic deployment.
 
 The Trash cleanup Cron is ``0 18 * * *`` in ``wrangler.jsonc`` (18:00 UTC / 03:00 Japan time every day). Notes that have been in Trash for seven days are permanently deleted during the next cleanup run, after their R2 attachments are deleted.
 
@@ -126,7 +126,7 @@ The Trash cleanup Cron is ``0 18 * * *`` in ``wrangler.jsonc`` (18:00 UTC / 03:0
 **Updates to the official repository do not update your fork automatically.** Choose which changes to bring into your fork.
 
 1. Before updating, check the README changes, new files in ``migrations/``, changes to ``wrangler.jsonc``, Chrome extension version and changes, and conflicts with your own edits. Do not replace your D1 ID or R2 settings with the author’s values.
-2. If there is a new migration, first bring the change into a local working branch. Before merging it into your fork’s ``main``, run ``npx wrangler d1 migrations apply mykeep --remote`` as described in [Continuous deployment](#continuous-deployment). Automatic deployment does not update D1.
+2. If there is a new migration, first bring the change into a local working branch. Before merging it into your fork’s ``main``, apply it to local and production D1 using the commands in [Continuous deployment](#continuous-deployment). Automatic deployment does not update D1.
 3. On GitHub, use **Sync fork** to review differences and **Update branch** to apply them. Updating ``main`` starts an automatic deployment, so prepare any required migrations and configuration first. Review and resolve conflicts or changes that need discussion on a working branch or Pull Request before updating ``main``. See [GitHub’s official guide to syncing a fork](https://docs.github.com/ja/pull-requests/how-tos/work-with-forks/syncing-a-fork).
 4. After updating **your fork’s ``main``**, check the Cloudflare Workers Builds result. If the Chrome extension changed, update your local ``extension/`` folder and reload it in Chrome.
 
@@ -159,6 +159,8 @@ Rich links use saved preview information first and fill in missing information t
 - Select a label in the sidebar to see **regular and archived notes** with that label. Trash is excluded.
 - In the editor, choose multiple labels from the dropdown and remove them with the “×” on a label chip. A name entered through “+ Create new label” is registered when the note is saved.
 - Select “Organize labels” at the bottom of the sidebar to create labels, rename them, or delete several at once, including unused labels. You can also create a label from the bulk label screen.
+- In label management, create, rename, or delete groups, then move labels into a group or back to no group. Groups contain labels and cannot be nested.
+- Groups and their labels are sorted alphabetically, followed by ungrouped labels in alphabetical order. Expanding or collapsing a group changes only its display and does not filter notes. Deleting a group keeps its labels and notes; those labels become ungrouped.
 - Select the pencil button on a label row to rename it. The label keeps its links to all notes, and an open label page follows the new name. Renaming is rejected if another label already has the destination name; labels are not merged.
 - Deletion requires confirmation. It removes the label from all notes but does not delete the notes, images, or checklists.
 
@@ -175,7 +177,7 @@ Names are checked for duplicates after trimming surrounding spaces and applying 
 
 ## Chrome extension
 
-**MyKeep Capture v0.3.4** supports Chrome Manifest V3 and Chrome 120 or later.
+**MyKeep Capture v0.3.5** supports Chrome Manifest V3 and Chrome 120 or later. The label selector displays labels by group.
 
 ### Install and configure
 
@@ -193,7 +195,7 @@ The API URL and API key are stored in ``chrome.storage.local``. HTTPS is require
 
 Select the toolbar icon to fetch the current page’s title and URL. You can freely edit the title before saving (up to 300 characters); if a URL is present, it can be saved with an empty title. A title you have entered is not overwritten by a later fetch.
 
-Add an optional note, registered labels (multiple, up to 50), and one image. Turn on “Pin” beside the label selector to save the note already pinned. It is off when the popup opens. Add an image with Ctrl+V or the file picker; supported formats and the 20 MB limit are the same as in the web app.
+Add an optional note, registered labels (grouped, multiple, up to 50), and one image. Turn on “Pin” beside the label selector to save the note already pinned. It is off when the popup opens. Add an image with Ctrl+V or the file picker; supported formats and the 20 MB limit are the same as in the web app.
 
 Normal saves use ``activeTab`` to fetch the current page’s Open Graph / Twitter Card title, description, image, and domain. If fetching fails, the extension can still save the title and URL. You cannot create a new label from the popup.
 
@@ -272,13 +274,13 @@ mykeep-backup-YYYY-MM-DD.zip
    └─ uniquely named files with IDs
 ```
 
-``notes.json`` contains the format name, version, export time, and an array of notes. Each note includes its ID, title, text, URL, color, pin, archive, and Trash state and dates; creation and update times; checklist state and order; labels; attachment details; and Markdown path. It also includes saved ``preview_title``, ``preview_description``, ``preview_image``, and ``preview_hostname``, plus the selected representative image in ``card_image``.
+``notes.json`` contains the format name, version, export time, and an array of notes. At the top level, ``label_groups`` lists every group, including empty groups, and ``label_group_memberships`` stores each label’s ``label_name`` and ``group_id``; ``group_id`` is ``null`` for ungrouped labels. The format remains at version 1, and existing note fields and string-array ``labels`` are preserved. Each note includes its ID, title, text, URL, color, pin, archive, and Trash state and dates; creation and update times; checklist state and order; labels; attachment details; and Markdown path. It also includes saved ``preview_title``, ``preview_description``, ``preview_image``, and ``preview_hostname``, plus the selected representative image in ``card_image``.
 
 Markdown files store note text, URL, dates, state, checklist, labels, and attachment paths in a human-readable format. Images, PDFs, and other R2 files go in ``attachments/``. Images are not embedded as Base64 in JSON. **External preview images are included as URL information only; their image files are not in the ZIP.**
 
 If an attachment cannot be fetched, Export continues when possible and sets that attachment’s ``zip_path`` to ``null``. At the end, it shows the number of notes and successful and failed attachments. Browsers with direct file access write items to the selected file in sequence. Other browsers download the completed ZIP as an in-memory Blob. Large backups require enough free memory on the device.
 
-Do not change data from another tab or device while Export is running. Unused labels that are not assigned to notes are not exported. This ZIP cannot be imported back into MyKeep as a restore, and re-importing it into Google Keep is not guaranteed.
+Do not change data from another tab or device while Export is running. Unused labels and empty groups are included. This ZIP cannot be imported back into MyKeep as a restore, and re-importing it into Google Keep is not guaranteed.
 
 ## PWA
 

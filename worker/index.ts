@@ -44,6 +44,16 @@ interface LabelRow {
   name: string;
 }
 
+interface LabelDetailRow {
+  name: string;
+  group_id: string | null;
+}
+
+interface LabelGroupRow {
+  id: string;
+  name: string;
+}
+
 const SELECT_NOTE = "SELECT id, title, body, url, pinned, archived, color, deleted_at, created_at, updated_at, preview_title, preview_description, preview_image, preview_hostname, card_image FROM notes";
 const PAGE_SIZE = 50;
 const MAX_SEARCH_LENGTH = 200;
@@ -71,6 +81,13 @@ function toNote(row: NoteRow, attachments: Attachment[] = [], checklist: Checkli
 
 function labelKey(name: string): string {
   return name.trim().normalize("NFC").toLowerCase();
+}
+
+function parseLabelGroupName(value: unknown): { name: string; nameKey: string } | null {
+  if (typeof value !== "string" || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) return null;
+  const name = value.trim().normalize("NFC");
+  if (!name || name.length > 100) return null;
+  return { name, nameKey: labelKey(name) };
 }
 
 function toAttachment(row: AttachmentRow): Attachment {
@@ -343,10 +360,128 @@ async function sidebarCounts(env: Env): Promise<Response> {
 }
 
 async function listLabels(env: Env): Promise<Response> {
+  const [labelsResult, groupsResult] = await Promise.all([
+    env.DB.prepare("SELECT name, group_id FROM labels ORDER BY name").all<LabelDetailRow>(),
+    env.DB.prepare("SELECT id, name FROM label_groups ORDER BY name").all<LabelGroupRow>(),
+  ]);
+  const labelDetails = labelsResult.results ?? [];
+  return json({
+    labels: labelDetails.map((row) => row.name),
+    groups: groupsResult.results ?? [],
+    labelDetails,
+  });
+}
+
+async function listLabelGroups(env: Env): Promise<Response> {
   const result = await env.DB.prepare(
-    "SELECT name FROM labels ORDER BY name",
-  ).all<{ name: string }>();
-  return json({ labels: (result.results ?? []).map((row) => row.name) });
+    "SELECT id, name FROM label_groups ORDER BY name",
+  ).all<LabelGroupRow>();
+  return json({ groups: result.results ?? [] });
+}
+
+async function createLabelGroup(request: Request, env: Env): Promise<Response> {
+  const value = await readInput(request, 20_000);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return json({ error: "グループ名は1〜100文字で入力してください。" }, 400);
+  }
+  const input = value as Record<string, unknown>;
+  const groupName = parseLabelGroupName(input.name);
+  if (Object.keys(input).length !== 1 || !groupName) {
+    return json({ error: "グループ名は1〜100文字で入力してください。" }, 400);
+  }
+
+  const id = crypto.randomUUID();
+  try {
+    await env.DB.prepare(
+      "INSERT INTO label_groups (id, name_key, name) VALUES (?, ?, ?)",
+    ).bind(id, groupName.nameKey, groupName.name).run();
+  } catch (error) {
+    if (error instanceof Error && /unique constraint|constraint failed/i.test(error.message)) {
+      return json({ error: "同じ名前のグループが既に存在します。" }, 409);
+    }
+    throw error;
+  }
+  return json({ group: { id, name: groupName.name } }, 201);
+}
+
+async function updateLabelGroup(id: string, request: Request, env: Env): Promise<Response> {
+  if (!isStrictUuid(id)) return json({ error: "グループの指定が正しくありません。" }, 400);
+  const value = await readInput(request, 20_000);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return json({ error: "グループ名は1〜100文字で入力してください。" }, 400);
+  }
+  const input = value as Record<string, unknown>;
+  const groupName = parseLabelGroupName(input.name);
+  if (Object.keys(input).length !== 1 || !groupName) {
+    return json({ error: "グループ名は1〜100文字で入力してください。" }, 400);
+  }
+
+  const current = await env.DB.prepare("SELECT id FROM label_groups WHERE id = ?")
+    .bind(id).first<{ id: string }>();
+  if (!current) return json({ error: "グループが見つかりません。" }, 404);
+  const duplicate = await env.DB.prepare(
+    "SELECT id FROM label_groups WHERE name_key = ? AND id <> ?",
+  ).bind(groupName.nameKey, id).first<{ id: string }>();
+  if (duplicate) return json({ error: "同じ名前のグループが既に存在します。" }, 409);
+
+  try {
+    const result = await env.DB.prepare(
+      "UPDATE label_groups SET name = ?, name_key = ? WHERE id = ?",
+    ).bind(groupName.name, groupName.nameKey, id).run();
+    if (result.meta.changes === 0) return json({ error: "グループが見つかりません。" }, 404);
+  } catch (error) {
+    if (error instanceof Error && /unique constraint|constraint failed/i.test(error.message)) {
+      return json({ error: "同じ名前のグループが既に存在します。" }, 409);
+    }
+    throw error;
+  }
+  return json({ group: { id, name: groupName.name } });
+}
+
+async function deleteLabelGroup(id: string, env: Env): Promise<Response> {
+  if (!isStrictUuid(id)) return json({ error: "グループの指定が正しくありません。" }, 400);
+  const result = await env.DB.prepare("DELETE FROM label_groups WHERE id = ?").bind(id).run();
+  if (result.meta.changes === 0) return json({ error: "グループが見つかりません。" }, 404);
+  return json({ deleted: 1 });
+}
+
+async function assignLabelGroup(request: Request, env: Env): Promise<Response> {
+  const value = await readInput(request, 20_000);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return json({ error: "ラベルの指定が正しくありません。" }, 400);
+  }
+  const input = value as Record<string, unknown>;
+  if (Object.keys(input).length !== 2 || !Object.keys(input).includes("name")
+    || !Object.keys(input).includes("group_id") || typeof input.name !== "string") {
+    return json({ error: "ラベルの指定が正しくありません。" }, 400);
+  }
+  const name = input.name.trim().normalize("NFC");
+  const groupId = input.group_id;
+  if (!name || name.length > 100 || (groupId !== null && !isStrictUuid(groupId))) {
+    return json({ error: "ラベルの指定が正しくありません。" }, 400);
+  }
+
+  const key = labelKey(name);
+  const label = await env.DB.prepare("SELECT name FROM labels WHERE name_key = ?")
+    .bind(key).first<{ name: string }>();
+  if (!label) return json({ error: "ラベルが見つかりません。" }, 404);
+  if (groupId !== null) {
+    const group = await env.DB.prepare("SELECT id FROM label_groups WHERE id = ?")
+      .bind(groupId).first<{ id: string }>();
+    if (!group) return json({ error: "グループが見つかりません。" }, 404);
+  }
+
+  try {
+    const result = await env.DB.prepare("UPDATE labels SET group_id = ? WHERE name_key = ?")
+      .bind(groupId, key).run();
+    if (result.meta.changes === 0) return json({ error: "ラベルが見つかりません。" }, 404);
+  } catch (error) {
+    if (groupId !== null && error instanceof Error && /foreign key constraint failed/i.test(error.message)) {
+      return json({ error: "グループが見つかりません。" }, 404);
+    }
+    throw error;
+  }
+  return json({ name: label.name, group_id: groupId });
 }
 
 async function createLabel(request: Request, env: Env): Promise<Response> {
@@ -424,7 +559,7 @@ async function renameLabel(request: Request, env: Env): Promise<Response> {
       // Keep the old-label existence check in the transaction. If another
       // request deletes it before this batch starts, no target row is made.
       env.DB.prepare(
-        "INSERT INTO labels (name_key, name) SELECT ?, ? WHERE EXISTS (SELECT 1 FROM labels WHERE name_key = ?)",
+        "INSERT INTO labels (name_key, name, group_id) SELECT ?, ?, group_id FROM labels WHERE name_key = ?",
       ).bind(newKey, newName, oldKey),
       env.DB.prepare(
         "INSERT OR IGNORE INTO note_labels (note_id, label_key) SELECT note_id, ? FROM note_labels WHERE label_key = ?",
@@ -1028,6 +1163,21 @@ export default {
         if (request.method === "POST") return await createLabel(request, env);
         if (request.method === "DELETE") return await deleteLabels(request, env);
         if (request.method === "PATCH") return await renameLabel(request, env);
+      }
+
+      if (url.pathname === "/api/labels/group" && request.method === "PATCH") {
+        return await assignLabelGroup(request, env);
+      }
+
+      if (url.pathname === "/api/label-groups") {
+        if (request.method === "GET") return await listLabelGroups(env);
+        if (request.method === "POST") return await createLabelGroup(request, env);
+      }
+
+      const labelGroupMatch = /^\/api\/label-groups\/([^/]+)$/.exec(url.pathname);
+      if (labelGroupMatch) {
+        if (request.method === "PATCH") return await updateLabelGroup(labelGroupMatch[1], request, env);
+        if (request.method === "DELETE") return await deleteLabelGroup(labelGroupMatch[1], env);
       }
 
       if (url.pathname === "/api/export/counts" && request.method === "GET") {

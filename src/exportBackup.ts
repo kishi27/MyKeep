@@ -3,6 +3,9 @@ import type { Attachment, Note } from "./types";
 
 type ExportView = "active" | "archived" | "trash";
 type BackupAttachment = Pick<Attachment, "id" | "filename" | "mime_type" | "created_at"> & { zip_path: string | null };
+interface ExportLabelGroup { id: string; name: string }
+interface ExportLabelDetail { name: string; group_id: string | null }
+interface ExportLabelMembership { label_name: string; group_id: string | null }
 
 export interface BackupProgress {
   stage: "notes" | "attachments" | "zip" | "done";
@@ -63,6 +66,58 @@ async function getJson<T>(path: string, fetcher: (path: string) => Promise<Respo
   return await response.json() as T;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function validateLabelMetadata(value: unknown): { groups: ExportLabelGroup[]; memberships: ExportLabelMembership[] } {
+  const invalid = () => new Error("ラベル一覧の応答が正しくありません。");
+  if (!isRecord(value) || !Array.isArray(value.labels) || !value.labels.every((name) => typeof name === "string")) {
+    throw invalid();
+  }
+  const labels = value.labels as string[];
+  const labelNames = new Set(labels);
+  if (labelNames.size !== labels.length) throw invalid();
+
+  const hasGroups = Object.prototype.hasOwnProperty.call(value, "groups");
+  const hasDetails = Object.prototype.hasOwnProperty.call(value, "labelDetails");
+  let groups: ExportLabelGroup[];
+  let details: ExportLabelDetail[];
+  if (!hasGroups && !hasDetails) {
+    groups = [];
+    details = labels.map((name) => ({ name, group_id: null }));
+  } else {
+    if (!hasGroups || !hasDetails || !Array.isArray(value.groups) || !Array.isArray(value.labelDetails)) throw invalid();
+
+    groups = [];
+    const groupIds = new Set<string>();
+    for (const item of value.groups) {
+      if (!isRecord(item) || typeof item.id !== "string" || !item.id || typeof item.name !== "string") throw invalid();
+      if (groupIds.has(item.id)) throw invalid();
+      groupIds.add(item.id);
+      groups.push({ id: item.id, name: item.name });
+    }
+
+    details = [];
+    const detailNames = new Set<string>();
+    for (const item of value.labelDetails) {
+      if (!isRecord(item) || typeof item.name !== "string" || !(item.group_id === null || typeof item.group_id === "string")) {
+        throw invalid();
+      }
+      if (!labelNames.has(item.name) || detailNames.has(item.name)) throw invalid();
+      if (item.group_id !== null && !groupIds.has(item.group_id)) throw invalid();
+      detailNames.add(item.name);
+      details.push({ name: item.name, group_id: item.group_id });
+    }
+    if (detailNames.size !== labelNames.size) throw invalid();
+  }
+
+  return {
+    groups,
+    memberships: details.map(({ name, group_id }) => ({ label_name: name, group_id })),
+  };
+}
+
 export function backupFileName(date = new Date()): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -76,6 +131,7 @@ export async function createBackup(
   fetcher: (path: string) => Promise<Response> = (path) => fetch(path),
 ): Promise<BackupResult> {
   const counts = await getJson<{ notes: number; attachments: number }>("/api/export/counts", fetcher);
+  const labelMetadata = validateLabelMetadata(await getJson<unknown>("/api/labels", fetcher));
   const progress: BackupProgress = {
     stage: "notes", notesDone: 0, notesTotal: counts.notes,
     attachmentsDone: 0, attachmentsTotal: counts.attachments,
@@ -149,7 +205,9 @@ export async function createBackup(
   progress.stage = "zip";
   onProgress({ ...progress });
   await writer.add("notes.json", new TextReader(JSON.stringify({
-    format: "mykeep-backup", version: 1, exported_at: new Date().toISOString(), notes: exportedNotes,
+    format: "mykeep-backup", version: 1, exported_at: new Date().toISOString(),
+    label_groups: labelMetadata.groups, label_group_memberships: labelMetadata.memberships,
+    notes: exportedNotes,
   }, null, 2)));
   const blob = await writer.close();
   progress.stage = "done";

@@ -3,6 +3,7 @@ import { readPageMetadata } from "./pageMetadata.js";
 import { getLanguage, initializeI18n, localizeError, onLanguageChange, t } from "./i18n.js";
 
 const MAX_LABEL_SELECTIONS = 50;
+const LABEL_GROUPS_EXPANDED_STORAGE_KEY = "mykeepLabelGroupsExpanded";
 
 const form = document.getElementById("captureForm");
 const title = document.getElementById("title");
@@ -24,6 +25,9 @@ const openNote = document.getElementById("openNote");
 let selectedImage = null;
 let previewUrl = null;
 let availableLabels = [];
+let availableGroups = [];
+let ungroupedLabels = [];
+let expandedLabelGroupIds = new Set();
 let selectedLabels = [];
 let savedNoteUrl = "";
 let pagePreview = { title: "", description: "", image: "", hostname: "" };
@@ -106,6 +110,55 @@ function normalizeLabels(values) {
   return result;
 }
 
+function normalizeGroupId(value) {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return "";
+}
+
+function labelNameCollator() {
+  return new Intl.Collator(getLanguage() === "en" ? "en" : "ja", { numeric: true, sensitivity: "base" });
+}
+
+function sortLabelNames(values) {
+  const collator = labelNameCollator();
+  return [...values].sort((left, right) => collator.compare(left, right));
+}
+
+function organizeLabelData(result, labels) {
+  const groups = [];
+  const seenGroupIds = new Set();
+  for (const value of Array.isArray(result.groups) ? result.groups : []) {
+    if (!value || typeof value !== "object") continue;
+    const id = normalizeGroupId(value.id);
+    const name = typeof value.name === "string" ? value.name.trim().normalize("NFC") : "";
+    if (!id || !name || seenGroupIds.has(id)) continue;
+    seenGroupIds.add(id);
+    groups.push({ id, name, labels: [] });
+  }
+
+  const groupsById = new Map(groups.map((group) => [group.id, group]));
+  const groupByLabelKey = new Map();
+  for (const detail of Array.isArray(result.labelDetails) ? result.labelDetails : []) {
+    if (!detail || typeof detail !== "object" || typeof detail.name !== "string") continue;
+    const name = detail.name.trim().normalize("NFC");
+    if (!name) continue;
+    groupByLabelKey.set(labelKey(name), normalizeGroupId(detail.group_id));
+  }
+
+  const ungrouped = [];
+  for (const name of sortLabelNames(labels)) {
+    const group = groupsById.get(groupByLabelKey.get(labelKey(name)));
+    if (group) group.labels.push(name);
+    else ungrouped.push(name);
+  }
+  for (const group of groups) group.labels = sortLabelNames(group.labels);
+  const collator = labelNameCollator();
+  groups.sort((left, right) => collator.compare(left.name, right.name));
+
+  return { labels: sortLabelNames(labels), groups, ungroupedLabels: ungrouped };
+}
+
 function renderSelectedLabels() {
   selectedLabelsElement.replaceChildren();
   for (const name of selectedLabels) {
@@ -153,19 +206,88 @@ function toggleLabel(name, checked) {
   updateLabelOptionState();
 }
 
+function createLabelOption(name) {
+  const option = document.createElement("label");
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.value = name;
+  checkbox.addEventListener("change", () => toggleLabel(name, checkbox.checked));
+  option.append(checkbox, document.createTextNode(name));
+  return option;
+}
+
+function persistExpandedLabelGroups() {
+  void chrome.storage.local.set({
+    [LABEL_GROUPS_EXPANDED_STORAGE_KEY]: Array.from(expandedLabelGroupIds),
+  }).catch(() => {});
+}
+
+async function loadExpandedLabelGroups() {
+  try {
+    const settings = await chrome.storage.local.get(LABEL_GROUPS_EXPANDED_STORAGE_KEY);
+    const storedIds = settings[LABEL_GROUPS_EXPANDED_STORAGE_KEY];
+    expandedLabelGroupIds = new Set(
+      Array.isArray(storedIds) ? storedIds.map(normalizeGroupId).filter(Boolean) : [],
+    );
+  } catch {
+    expandedLabelGroupIds = new Set();
+  }
+}
+
 function renderLabelOptions() {
   labelOptions.replaceChildren();
-  for (const name of availableLabels) {
-    const option = document.createElement("label");
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.value = name;
-    checkbox.addEventListener("change", () => toggleLabel(name, checkbox.checked));
-    option.append(checkbox, document.createTextNode(name));
-    labelOptions.append(option);
+  availableGroups.forEach((group, index) => {
+    const section = document.createElement("div");
+    section.className = "label-group";
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "label-group-toggle";
+    toggle.textContent = group.name;
+    toggle.setAttribute("aria-expanded", String(expandedLabelGroupIds.has(group.id)));
+    toggle.setAttribute("aria-controls", `labelGroupOptions-${index}`);
+    toggle.setAttribute("aria-label", t("popup.toggleLabelGroup", { group: group.name }));
+
+    const children = document.createElement("div");
+    children.id = `labelGroupOptions-${index}`;
+    children.className = "label-group-options";
+    children.setAttribute("role", "group");
+    children.setAttribute("aria-label", group.name);
+    children.hidden = !expandedLabelGroupIds.has(group.id);
+    for (const name of group.labels) children.append(createLabelOption(name));
+
+    toggle.addEventListener("click", () => {
+      const expanded = !expandedLabelGroupIds.has(group.id);
+      if (expanded) expandedLabelGroupIds.add(group.id);
+      else expandedLabelGroupIds.delete(group.id);
+      toggle.setAttribute("aria-expanded", String(expanded));
+      children.hidden = !expanded;
+      persistExpandedLabelGroups();
+    });
+    section.append(toggle, children);
+    labelOptions.append(section);
+  });
+
+  if (availableGroups.length && ungroupedLabels.length) {
+    const divider = document.createElement("div");
+    divider.className = "label-group-divider";
+    divider.setAttribute("role", "separator");
+    const ungrouped = document.createElement("div");
+    ungrouped.className = "label-ungrouped";
+    ungrouped.setAttribute("role", "group");
+    ungrouped.setAttribute("aria-label", t("popup.ungroupedLabels"));
+    const heading = document.createElement("div");
+    heading.className = "label-ungrouped-title";
+    heading.textContent = t("popup.ungroupedLabels");
+    ungrouped.append(heading);
+    for (const name of ungroupedLabels) ungrouped.append(createLabelOption(name));
+    labelOptions.append(divider, ungrouped);
+  } else {
+    for (const name of ungroupedLabels) labelOptions.append(createLabelOption(name));
   }
-  labelToggle.disabled = availableLabels.length === 0;
-  if (!availableLabels.length) {
+
+  const hasLabelOptions = availableLabels.length > 0 || availableGroups.length > 0;
+  labelToggle.disabled = !hasLabelOptions;
+  if (!hasLabelOptions) {
     labelOptions.hidden = true;
     labelToggle.setAttribute("aria-expanded", "false");
   }
@@ -177,6 +299,7 @@ async function loadLabels() {
   try {
     const settings = await chrome.storage.local.get(["apiUrl", "apiKey"]);
     if (!settings.apiUrl || !settings.apiKey) return;
+    await loadExpandedLabelGroups();
     const endpoint = captureEndpoint(settings.apiUrl);
     const response = await fetch(endpoint, {
       method: "GET",
@@ -193,13 +316,17 @@ async function loadLabels() {
     if (!response.ok || !result || !Array.isArray(result.labels)) {
       throw new Error("labels_unavailable");
     }
-    availableLabels = normalizeLabels(result.labels.map((value) => {
+    const labels = normalizeLabels(result.labels.map((value) => {
       if (typeof value === "string") return value;
       if (value && typeof value === "object" && typeof value.name === "string") return value.name;
       return "";
     }));
+    const labelData = organizeLabelData(result, labels);
+    availableLabels = labelData.labels;
+    availableGroups = labelData.groups;
+    ungroupedLabels = labelData.ungroupedLabels;
     renderLabelOptions();
-    if (!availableLabels.length) showLabelStatus("popup.noLabels");
+    showLabelStatus(!availableLabels.length && !availableGroups.length ? "popup.noLabels" : "");
   } catch {
     showLabelStatus("popup.labelsLoadFailed");
   }
@@ -389,7 +516,7 @@ form.addEventListener("submit", async (event) => {
 });
 
 onLanguageChange(() => {
-  renderSelectedLabels();
+  renderLabelOptions();
   if (labelStatusMessage) labelStatus.textContent = t(labelStatusMessage);
   renderStatus();
 });

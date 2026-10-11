@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ChangeEvent, ClipboardEvent, DragEvent, FormEvent } from "react";
+import type { ChangeEvent, ClipboardEvent, DragEvent, FormEvent, ReactNode } from "react";
 import { BlobWriter } from "@zip.js/zip.js";
 import { backupFileName, createBackup } from "./exportBackup";
 import type { BackupProgress, BackupResult } from "./exportBackup";
@@ -24,6 +24,41 @@ type UndoAction = { message: string; undo?: () => Promise<void> };
 type BulkOperation = "archive" | "unarchive" | "trash" | "restore" | "permanent" | "addLabels" | "removeLabel";
 type BulkResult = { message: string; failed: number };
 type CreatedLabel = { label: string; created: boolean };
+type LabelGroup = { id: string; name: string };
+type LabelDetail = { name: string; group_id: string | null };
+type LabelList = { labels: string[]; groups?: LabelGroup[]; labelDetails?: LabelDetail[] };
+const GROUP_EXPANSION_SETTING = "mykeep.expandedLabelGroups";
+
+function savedExpandedGroups(): Set<string> {
+  try {
+    const ids: unknown = JSON.parse(localStorage.getItem(GROUP_EXPANSION_SETTING) ?? "[]");
+    return new Set(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : []);
+  } catch { return new Set(); }
+}
+
+function GroupedLabels({ labels, groups, details, renderLabel, expanded, onToggle }: {
+  labels: string[]; groups: LabelGroup[]; details: LabelDetail[]; renderLabel: (name: string) => ReactNode;
+  expanded?: Set<string>; onToggle?: (id: string) => void;
+}) {
+  const { locale } = useI18n();
+  const sorted = [...labels].sort((a, b) => a.localeCompare(b, locale));
+  const sortedGroups = [...groups].sort((a, b) => a.name.localeCompare(b.name, locale));
+  const membership = new Map(details.map((label) => [labelKey(label.name), label.group_id]));
+  const groupIds = new Set(groups.map((group) => group.id));
+  const flat = sorted.filter((name) => !groupIds.has(membership.get(labelKey(name)) ?? ""));
+  return <>
+    {sortedGroups.map((group) => <div className="label-group" key={group.id}>
+      {onToggle ? <button type="button" className="label-group-toggle" aria-expanded={expanded?.has(group.id) ?? false}
+        onClick={() => onToggle(group.id)}><span aria-hidden="true">{expanded?.has(group.id) ? "▾" : "▸"}</span><span className="nav-name">{group.name}</span></button>
+        : <div className="label-group-heading">{group.name}</div>}
+      {(!onToggle || expanded?.has(group.id)) && <div className="label-group-children">
+        {sorted.filter((name) => membership.get(labelKey(name)) === group.id).map(renderLabel)}
+      </div>}
+    </div>)}
+    {groups.length > 0 && flat.length > 0 && <hr className="label-group-divider" />}
+    {flat.map(renderLabel)}
+  </>;
+}
 type ScrollAnchor = { id: string | null; top: number; scrollY: number };
 type ViewerImage = Pick<Attachment, "id" | "url" | "filename"> & { kind: "attachment" | "preview" };
 
@@ -300,6 +335,12 @@ function MyKeep() {
   const [search, setSearch] = useState("");
   const [labelFilter, setLabelFilter] = useState("");
   const [availableLabels, setAvailableLabels] = useState<string[]>([]);
+  const [labelGroups, setLabelGroups] = useState<LabelGroup[]>([]);
+  const [labelDetails, setLabelDetails] = useState<LabelDetail[]>([]);
+  const [expandedGroups, setExpandedGroups] = useState(savedExpandedGroups);
+  useEffect(() => {
+    try { localStorage.setItem(GROUP_EXPANSION_SETTING, JSON.stringify([...expandedGroups])); } catch { /* In-memory expansion still works. */ }
+  }, [expandedGroups]);
   const [counts, setCounts] = useState<SidebarCounts | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [notes, setNotes] = useState<Note[]>([]);
@@ -353,6 +394,13 @@ function MyKeep() {
   const [renamingLabel, setRenamingLabel] = useState(false);
   const [renameError, setRenameError] = useState("");
   const renamingLabelRef = useRef(false);
+  const [newGroupName, setNewGroupName] = useState("");
+  const [editingGroup, setEditingGroup] = useState<string | null>(null);
+  const [groupRenameName, setGroupRenameName] = useState("");
+  const [groupDeleteId, setGroupDeleteId] = useState<string | null>(null);
+  const [groupBusy, setGroupBusy] = useState(false);
+  const groupBusyRef = useRef(false);
+  const [groupError, setGroupError] = useState("");
   const [importOpen, setImportOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [richLinkPreview, setRichLinkPreview] = useState(() => savedSetting(PREVIEW_SETTING, true));
@@ -546,13 +594,18 @@ function MyKeep() {
   }, [view, search, labelFilter, reload]);
 
   useEffect(() => {
-    api<{ labels: string[] }>("/api/labels")
+    const controller = new AbortController();
+    api<LabelList>("/api/labels", { signal: controller.signal })
       .then((data) => {
+        if (controller.signal.aborted) return;
         setAvailableLabels(data.labels);
+        setLabelGroups(data.groups ?? []);
+        setLabelDetails(data.labelDetails ?? []);
         setLabelFilter((current) => current && !data.labels.includes(current)
           && current !== preservedLabelFilterRef.current ? "" : current);
       })
-      .catch(() => setAvailableLabels([]));
+      .catch(() => { /* Keep the last known labels when a refresh fails. */ });
+    return () => controller.abort();
   }, [reload]);
 
   useEffect(() => {
@@ -820,6 +873,10 @@ function MyKeep() {
     setLabelDeleteConfirm(false);
     setLabelDeleteError("");
     cancelLabelRename();
+    setEditingGroup(null);
+    setGroupDeleteId(null);
+    setNewGroupName("");
+    setGroupError("");
   }
 
   function openLabelManager() {
@@ -827,8 +884,52 @@ function MyKeep() {
     setLabelDeleteConfirm(false);
     setLabelDeleteError("");
     cancelLabelRename();
+    setEditingGroup(null);
+    setGroupDeleteId(null);
+    setGroupError("");
     setLabelManagerOpen(true);
     setMenuOpen(false);
+  }
+
+  function toggleGroup(id: string) {
+    setExpandedGroups((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  async function changeGroup(action: "create" | "rename" | "delete" | "move", name = "", id: string | null = null) {
+    if (groupBusyRef.current || labelManagerBusy) return;
+    groupBusyRef.current = true;
+    setGroupBusy(true);
+    setGroupError("");
+    try {
+      if (action === "move") {
+        const detail = await api<LabelDetail>("/api/labels/group", { method: "PATCH", body: JSON.stringify({ name, group_id: id }) });
+        setLabelDetails((current) => [...current.filter((item) => labelKey(item.name) !== labelKey(detail.name)), detail]);
+      } else if (action === "delete") {
+        await api(`/api/label-groups/${id}`, { method: "DELETE" });
+        setLabelGroups((current) => current.filter((group) => group.id !== id));
+        setLabelDetails((current) => current.map((item) => item.group_id === id ? { ...item, group_id: null } : item));
+        setGroupDeleteId(null);
+      } else {
+        const normalized = normalizedLabelName(name);
+        if (!normalized) throw new Error("グループ名は1〜100文字で入力してください。");
+        const { group } = await api<{ group: LabelGroup }>(action === "create" ? "/api/label-groups" : `/api/label-groups/${id}`, {
+          method: action === "create" ? "POST" : "PATCH", body: JSON.stringify({ name: normalized }),
+        });
+        setLabelGroups((current) => [...current.filter((item) => item.id !== group.id), group]);
+        setNewGroupName("");
+        setEditingGroup(null);
+      }
+      reloadList();
+    } catch (cause) {
+      setGroupError(cause instanceof Error ? cause.message : "グループを更新できませんでした。");
+    } finally {
+      groupBusyRef.current = false;
+      setGroupBusy(false);
+    }
   }
 
   function cancelLabelRename() {
@@ -855,6 +956,7 @@ function MyKeep() {
         return [labelKey(renamed), renamed] as const;
       })).values()];
       setAvailableLabels((current) => replaceLabels(current).sort());
+      setLabelDetails((current) => current.map((item) => labelKey(item.name) === oldKey ? { ...item, name: label } : item));
       setSelectedLabels(replaceLabels);
       setBulkLabels(replaceLabels);
       setLabelsToDelete((current) => [...new Set(current.map((key) => key === oldKey ? newKey : key))]);
@@ -1460,7 +1562,7 @@ function MyKeep() {
   const labelOptions = [...availableLabels, ...selectedLabels].filter((name, index, all) =>
     all.findIndex((candidate) => labelKey(candidate) === labelKey(name)) === index);
   const deleteLabelNames = availableLabels.filter((name) => labelsToDelete.includes(labelKey(name)));
-  const labelManagerBusy = deletingLabels || creatingStandaloneLabel || renamingLabel || working || undoing;
+  const labelManagerBusy = deletingLabels || creatingStandaloneLabel || renamingLabel || groupBusy || working || undoing;
   const viewerImages: ViewerImage[] = editorAttachments.filter((attachment) => IMAGE_TYPES.includes(attachment.mime_type))
     .map(({ id, url, filename }) => ({ id, url, filename, kind: "attachment" }));
   if (editorPreviewImage) viewerImages.push({ id: "link-preview", url: editorPreviewImage, filename: t("サムネイル"), kind: "preview" });
@@ -1567,10 +1669,11 @@ function MyKeep() {
           <div className="sidebar-labels">
             <h2>{t("ラベル")}</h2>
             <nav className="sidebar-nav" aria-label={t("ラベル")}>
-              {availableLabels.map((name) => <button type="button" className={view === "active" && labelFilter === name ? "selected" : ""} aria-current={view === "active" && labelFilter === name ? "page" : undefined} onClick={() => selectLabel(name)} key={name} title={name}>
+              <GroupedLabels labels={availableLabels} groups={labelGroups} details={labelDetails} expanded={expandedGroups} onToggle={toggleGroup}
+                renderLabel={(name) => <button type="button" className={view === "active" && labelFilter === name ? "selected" : ""} aria-current={view === "active" && labelFilter === name ? "page" : undefined} onClick={() => selectLabel(name)} key={name} title={name}>
                 <span aria-hidden="true">🏷</span><span className="nav-name">{name}</span>
                 <span className="nav-count">{counts ? countFormat.format(Object.hasOwn(counts.labels, name) ? counts.labels[name] : 0) : "—"}</span>
-              </button>)}
+              </button>} />
               <button type="button" onClick={openLabelManager}><SettingsIcon />{t("ラベル整理")}</button>
             </nav>
           </div>
@@ -1632,8 +1735,9 @@ function MyKeep() {
           <div className="editor-heading"><h2>{t("ラベルを追加")}</h2><button type="button" className="close" aria-label={t("閉じる")} disabled={working || creatingStandaloneLabel} onClick={() => setBulkLabelsOpen(false)}>×</button></div>
           <LabelCreator disabled={working || creatingStandaloneLabel || bulkLabels.length >= 50} onCreate={(name) => createStandaloneLabel(name, true)} />
           <div className="label-manager-list">
-            {availableLabels.map((name) => <label key={name}><input type="checkbox" checked={bulkLabels.includes(name)} disabled={working || creatingStandaloneLabel || (!bulkLabels.includes(name) && bulkLabels.length >= 50)}
-              onChange={() => setBulkLabels((current) => current.includes(name) ? current.filter((label) => label !== name) : [...current, name])} />{name}</label>)}
+            <GroupedLabels labels={availableLabels} groups={labelGroups} details={labelDetails}
+              renderLabel={(name) => <label key={name}><input type="checkbox" checked={bulkLabels.includes(name)} disabled={working || creatingStandaloneLabel || (!bulkLabels.includes(name) && bulkLabels.length >= 50)}
+              onChange={() => setBulkLabels((current) => current.includes(name) ? current.filter((label) => label !== name) : [...current, name])} />{name}</label>} />
           </div>
           {!availableLabels.length && <p>{t("登録済みラベルはありません。")}</p>}
           <div className="label-manager-actions">
@@ -1668,22 +1772,64 @@ function MyKeep() {
       {labelManagerOpen && <div className="overlay" onMouseDown={(event) => { if (event.target === event.currentTarget && !labelManagerBusy) closeLabelManager(); }}>
         <section className="utility-modal" role="dialog" aria-modal="true" aria-label={t("ラベル整理")}>
           <div className="editor-heading"><h2>{t("ラベル整理")}</h2><button type="button" className="close" aria-label={t("閉じる")} onClick={closeLabelManager} disabled={labelManagerBusy}>×</button></div>
-          {!labelDeleteConfirm && <LabelCreator disabled={labelManagerBusy || editingLabel !== null} onCreate={(name) => createStandaloneLabel(name)} />}
-          {labelDeleteConfirm ? <>
+          {!labelDeleteConfirm && !groupDeleteId && <>
+            <section className="group-manager" aria-label={t("ラベルグループ")}>
+              <h3>{t("ラベルグループ")}</h3>
+              <div className="label-rename-row">
+                <input aria-label={t("新しいグループ名")} placeholder={t("新しいグループ名")} value={newGroupName} maxLength={100}
+                  disabled={labelManagerBusy || editingGroup !== null || editingLabel !== null} onChange={(event) => setNewGroupName(event.target.value)}
+                  onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); void changeGroup("create", newGroupName); } }} />
+                <button type="button" className="primary" disabled={labelManagerBusy || editingGroup !== null || editingLabel !== null || !newGroupName.trim()}
+                  onClick={() => void changeGroup("create", newGroupName)}>{t("グループを作成")}</button>
+              </div>
+              {[...labelGroups].sort((a, b) => a.name.localeCompare(b.name, locale)).map((group) => <div key={group.id}>
+                <div className="group-manager-row">
+                  <span>{group.name}</span>
+                  <button type="button" aria-label={t("{0}のグループ名を変更", { 0: group.name })} title={t("グループ名を変更")}
+                    disabled={labelManagerBusy || editingGroup !== null || editingLabel !== null}
+                    onClick={() => { setEditingGroup(group.id); setGroupRenameName(group.name); setGroupError(""); }}>✎</button>
+                  <button type="button" aria-label={t("{0}のグループを削除", { 0: group.name })} title={t("グループを削除")}
+                    disabled={labelManagerBusy || editingGroup !== null || editingLabel !== null}
+                    onClick={() => { setGroupDeleteId(group.id); setGroupError(""); }}>{t("削除")}</button>
+                </div>
+                {editingGroup === group.id && <div className="label-rename-row">
+                  <input aria-label={t("変更後のグループ名")} value={groupRenameName} maxLength={100} disabled={labelManagerBusy}
+                    onChange={(event) => setGroupRenameName(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); void changeGroup("rename", groupRenameName, group.id); } }} />
+                  <button type="button" className="primary" disabled={labelManagerBusy || !groupRenameName.trim()} onClick={() => void changeGroup("rename", groupRenameName, group.id)}>{t("保存")}</button>
+                  <button type="button" disabled={labelManagerBusy} onClick={() => { setEditingGroup(null); setGroupError(""); }}>{t("キャンセル")}</button>
+                </div>}
+              </div>)}
+            </section>
+            <LabelCreator disabled={labelManagerBusy || editingLabel !== null || editingGroup !== null} onCreate={(name) => createStandaloneLabel(name)} />
+          </>}
+          {groupDeleteId ? <>
+            <p>{t("グループ「{0}」を削除しますか？", { 0: labelGroups.find((group) => group.id === groupDeleteId)?.name ?? "" })}</p>
+            <p>{t("所属ラベルとメモは削除されません。ラベルはグループなしに戻ります。")}</p>
+          </> : labelDeleteConfirm ? <>
             <p>{deleteLabelNames.length <= 3
               ? t("「{0}」を削除しますか？", { 0: deleteLabelNames.join(language === "en" ? "”, “" : "」「") })
               : t("選択した{0}件のラベルを削除しますか？", { 0: countFormat.format(deleteLabelNames.length) })}</p>
             <p>{t("これらのラベルはメモからも外れます。メモ本体は削除されません。")}</p>
           </> : <div className="label-manager-list">
-            {availableLabels.map((name) => <div className="label-manager-entry" key={labelKey(name)}>
+            <GroupedLabels labels={availableLabels} groups={labelGroups} details={labelDetails} renderLabel={(name) => <div className="label-manager-entry" key={labelKey(name)}>
               <div className="label-manager-row">
                 <label><input type="checkbox" checked={labelsToDelete.includes(labelKey(name))}
-                  disabled={labelManagerBusy || editingLabel !== null || (labelsToDelete.length >= 50 && !labelsToDelete.includes(labelKey(name)))}
+                  disabled={labelManagerBusy || editingGroup !== null || editingLabel !== null || (labelsToDelete.length >= 50 && !labelsToDelete.includes(labelKey(name)))}
                   onChange={() => toggleLabelToDelete(name)} />{name}</label>
                 <button type="button" aria-label={t("{0}のラベル名を変更", { 0: name })} title={t("ラベル名を変更")}
-                  disabled={labelManagerBusy || editingLabel !== null}
+                  disabled={labelManagerBusy || editingGroup !== null || editingLabel !== null}
                   onClick={() => { setEditingLabel(name); setRenameName(name); setRenameError(""); setLabelDeleteError(""); }}>✎</button>
               </div>
+              <label className="label-membership">{t("所属グループ")}
+                <select aria-label={t("{0}の所属グループ", { 0: name })}
+                  value={labelDetails.find((item) => labelKey(item.name) === labelKey(name))?.group_id ?? ""}
+                  disabled={labelManagerBusy || editingLabel !== null || editingGroup !== null}
+                  onChange={(event) => void changeGroup("move", name, event.target.value || null)}>
+                  <option value="">{t("グループなし")}</option>
+                  {[...labelGroups].sort((a, b) => a.name.localeCompare(b.name, locale)).map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
+                </select>
+              </label>
               {editingLabel === name && <div className="label-rename-row">
                 <input aria-label={t("変更後のラベル名")} value={renameName} maxLength={100} disabled={labelManagerBusy}
                   onChange={(event) => setRenameName(event.target.value)}
@@ -1691,16 +1837,17 @@ function MyKeep() {
                 <button type="button" className="primary" disabled={labelManagerBusy || !renameName.trim()} onClick={() => void renameLabel()}>{t("保存")}</button>
                 <button type="button" disabled={labelManagerBusy} onClick={cancelLabelRename}>{t("キャンセル")}</button>
               </div>}
-            </div>)}
+            </div>} />
             {availableLabels.length === 0 && <p>{t("ラベルはありません。")}</p>}
           </div>}
           {labelDeleteError && <p className="error" role="alert">{uiMessage(labelDeleteError)}</p>}
           {renameError && <p className="error" role="alert">{uiMessage(renameError)}</p>}
+          {groupError && <p className="error" role="alert">{uiMessage(groupError)}</p>}
           <div className="label-manager-actions">
-            <button type="button" className="label-cancel-button" onClick={() => labelDeleteConfirm ? setLabelDeleteConfirm(false) : closeLabelManager()} disabled={labelManagerBusy}>{t("キャンセル")}</button>
-            {labelDeleteConfirm
+            <button type="button" className="label-cancel-button" onClick={() => groupDeleteId ? setGroupDeleteId(null) : labelDeleteConfirm ? setLabelDeleteConfirm(false) : closeLabelManager()} disabled={labelManagerBusy}>{t("キャンセル")}</button>
+            {groupDeleteId ? <button type="button" className="label-delete-button" disabled={labelManagerBusy} onClick={() => void changeGroup("delete", "", groupDeleteId)}>{t("グループを削除")}</button> : labelDeleteConfirm
               ? <button type="button" className="label-delete-button" onClick={() => { void deleteSelectedLabels(); }} disabled={labelManagerBusy || deleteLabelNames.length === 0}>{t("削除")}</button>
-              : <button type="button" className="label-delete-button" onClick={() => { setLabelDeleteError(""); setLabelDeleteConfirm(true); }} disabled={labelManagerBusy || editingLabel !== null || deleteLabelNames.length === 0}>{t("選択したラベルを削除")}</button>}
+              : <button type="button" className="label-delete-button" onClick={() => { setLabelDeleteError(""); setLabelDeleteConfirm(true); }} disabled={labelManagerBusy || editingGroup !== null || editingLabel !== null || deleteLabelNames.length === 0}>{t("選択したラベルを削除")}</button>}
           </div>
         </section>
       </div>}
@@ -1771,10 +1918,10 @@ function MyKeep() {
                     <button type="button" onClick={addNewLabel}>{t("追加")}</button>
                   </div>}
                   <div className="label-options">
-                    {labelOptions.map((name) => <label key={labelKey(name)}>
+                    <GroupedLabels labels={labelOptions} groups={labelGroups} details={labelDetails} renderLabel={(name) => <label key={labelKey(name)}>
                       <input type="checkbox" checked={selectedLabels.some((label) => labelKey(label) === labelKey(name))}
                         onChange={() => toggleLabel(name)} />{name}
-                    </label>)}
+                    </label>} />
                   </div>
                 </div>}
               </div>

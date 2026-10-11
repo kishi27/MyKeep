@@ -42,6 +42,10 @@ h1 { margin: 0; font-size: 1.35rem; font-weight: 700; }
 .sidebar-nav button.selected { background: #fff2c5; color: #282216; font-weight: 700; }
 .sidebar-labels { margin-top: 22px; }
 .sidebar-labels h2 { margin: 0 0 8px; padding: 0 12px; color: #777; font-size: .84rem; font-weight: 600; }
+.label-group-heading { padding: 8px 5px 4px; font-size: .85rem; font-weight: 600; overflow-wrap: anywhere; }
+.label-group-children { padding-left: 14px; display: grid; gap: 2px; }
+.label-group-divider { width: 100%; border: 0; border-top: 1px solid #cecec8; margin: 8px 0; }
+.sidebar-nav .label-group-toggle { font-weight: 600; }
 .sidebar-scrim { display: none; }
 .main-content { flex: 1; min-width: 0; }
 .trash-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 16px; }
@@ -122,6 +126,13 @@ button.card-content:hover { background: #ffffff70; }
 .label-rename-row input { flex: 1 1 100px; min-width: 0; width: 100%; height: auto; border: 1px solid #cecec8; border-radius: 7px; padding: 7px 9px; background: white; color: inherit; }
 .label-rename-row button.primary { background: #f4c84c; color: #242424; border-color: #f4c84c; }
 .label-manager-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; }
+.group-manager { display: grid; gap: 8px; }
+.group-manager h3 { margin: 0; font-size: .95rem; }
+.group-manager-row { display: flex; align-items: center; gap: 6px; }
+.group-manager-row > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.group-manager-row button { flex-shrink: 0; padding: 6px 10px; border: 1px solid #cecec8; border-radius: 7px; background: white; color: inherit; }
+.label-manager-list .label-membership { flex-wrap: wrap; gap: 6px; font-size: .8rem; padding-top: 0; }
+.label-membership select { flex: 1; min-width: 0; max-width: 100%; border: 1px solid #cecec8; border-radius: 6px; background: white; color: inherit; padding: 7px; }
 .label-manager-actions button { border-radius: 8px; padding: 9px 12px; }
 .label-cancel-button { border: 1px solid #cecec8; background: white; color: #242424; }
 .label-delete-button { border: 1px solid #a52f2f; background: #a52f2f; color: white; }
@@ -281,6 +292,8 @@ h2 { margin: 0; font-size: 1.15rem; }
 :root[data-theme="dark"] .label-cancel-button { background: #303237; border-color: #63666a; color: #eeeae0; }
 :root[data-theme="dark"] .label-manager-row > button, :root[data-theme="dark"] .label-rename-row button:not(.primary), :root[data-theme="dark"] .label-rename-row input { background: #303237; border-color: #63666a; color: #eeeae0; }
 :root[data-theme="dark"] .label-delete-button { background: #963735; border-color: #c35b58; color: white; }
+:root[data-theme="dark"] .group-manager-row button, :root[data-theme="dark"] .label-membership select { background: #303237; border-color: #63666a; color: #eeeae0; }
+:root[data-theme="dark"] .label-group-divider { border-color: #55595d; }
 :root[data-theme="dark"] .settings-dropdown button:hover { background: #373a3e; }
 :root[data-theme="dark"] .card, :root[data-theme="dark"] .editor { --note-bg: #2c2e31; border-color: #55565a; }
 :root[data-theme="dark"] .card[data-color="red"], :root[data-theme="dark"] .editor[data-color="red"] { --note-bg: #563433; }

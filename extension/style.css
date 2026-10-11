@@ -31,9 +31,16 @@ button:disabled { cursor: default; opacity: .55; }
 .label-picker-toggle::after { content: "▾"; color: #666; }
 .label-picker-toggle[aria-expanded="true"]::after { content: "▴"; }
 .label-picker-menu { position: absolute; z-index: 2; top: calc(100% + 4px); left: 0; right: 0; max-height: 180px; overflow-y: auto; border: 1px solid #cecec8; border-radius: 7px; background: #fff; padding: 4px; box-shadow: 0 8px 20px #0002; }
+.label-group-toggle { display: flex; align-items: center; width: 100%; border: 0; border-radius: 5px; background: transparent; padding: 7px 6px; color: #4a4a4a; text-align: left; font-size: .82rem; font-weight: 600; }
+.label-group-toggle::before { content: "▸"; width: 13px; flex: 0 0 13px; color: #666; }
+.label-group-toggle[aria-expanded="true"]::before { content: "▾"; }
+.label-group-toggle:hover { background: #f1f1ed; }
+.label-group-options { padding-left: 9px; }
 .label-picker-menu label { display: flex; align-items: center; gap: 7px; border-radius: 5px; padding: 6px; font-size: .82rem; font-weight: 400; overflow-wrap: anywhere; }
 .label-picker-menu label:hover { background: #f1f1ed; }
 .label-picker-menu input { width: 15px; height: 15px; flex: 0 0 auto; }
+.label-group-divider { margin: 4px 5px; border-top: 1px solid #deded8; }
+.label-ungrouped-title { padding: 6px 7px 3px; color: #777; font-size: .72rem; font-weight: 600; }
 .selected-labels { display: flex; flex-wrap: wrap; gap: 4px; }
 .selected-label { display: inline-flex; align-items: center; gap: 3px; max-width: 100%; border-radius: 999px; background: #e8e8e2; padding: 2px 6px; font-size: .75rem; font-weight: 400; overflow-wrap: anywhere; }
 .selected-label button { border: 0; background: transparent; color: inherit; padding: 0 1px; font-size: 1rem; line-height: 1; }
