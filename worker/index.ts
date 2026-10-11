@@ -1,4 +1,5 @@
 import { NOTE_COLORS } from "../src/types";
+import { handleBackupRestore } from "./restoreBackup";
 import { linkPreview } from "./linkPreview";
 import type { Attachment, CardImageChoice, ChecklistItem, Note, NoteColor, NoteInput, NotePreview } from "../src/types";
 
@@ -1182,6 +1183,11 @@ export default {
       if (request.method !== "GET") {
         const origin = request.headers.get("Origin");
         if (origin && origin !== url.origin) return json({ error: "この操作は許可されていません。" }, 403);
+      }
+
+      if (url.pathname.startsWith("/api/backup/restore/")) {
+        const response = await handleBackupRestore(request, env);
+        if (response) return response;
       }
 
       if (url.pathname === "/api/counts" && request.method === "GET") {

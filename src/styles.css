@@ -69,6 +69,15 @@ h1 { margin: 0; font-size: 1.35rem; font-weight: 700; }
 .import-content label { display: grid; gap: 6px; }
 .import-content input { max-width: 100%; }
 .import-content p { margin: 0; line-height: 1.6; }
+.import-options { display: grid; gap: 8px; min-width: 0; }
+.import-options button { min-width: 0; overflow-wrap: anywhere; padding: 10px 12px; border: 1px solid #cecec8; border-radius: 8px; background: transparent; color: inherit; text-align: left; }
+.import-options button[aria-pressed="true"] { border-color: #ae8730; background: #f4c84c; color: #242424; }
+.restore-backup h3 { margin: 0; font-size: 1rem; }
+.restore-backup { min-width: 0; }
+.restore-backup input { width: 100%; min-width: 0; }
+.restore-backup > .primary { justify-self: start; border: 0; border-radius: 8px; padding: 10px 14px; }
+.restore-results { display: grid; gap: 10px; overflow-wrap: anywhere; }
+.restore-hint { font-size: .8rem; }
 .grid { --card-columns: 5; --card-gap: 16px; display: grid; grid-template-columns: repeat(var(--card-columns), minmax(0, 1fr)); grid-auto-rows: 1px; column-gap: 16px; align-items: start; }
 .note-section-separator { height: 30px; }
 .card { width: 100%; min-width: 0; border: 1px solid #dddcd5; border-radius: 12px; background: var(--note-bg, #fff); box-shadow: 0 2px 5px #00000008; overflow: hidden; }

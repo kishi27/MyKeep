@@ -280,7 +280,17 @@ Markdown files store note text, URL, dates, state, checklist, labels, and attach
 
 If an attachment cannot be fetched, Export continues when possible and sets that attachment’s ``zip_path`` to ``null``. At the end, it shows the number of notes and successful and failed attachments. Browsers with direct file access write items to the selected file in sequence. Other browsers download the completed ZIP as an in-memory Blob. Large backups require enough free memory on the device.
 
-Do not change data from another tab or device while Export is running. Unused labels and empty groups are included. This ZIP cannot be imported back into MyKeep as a restore, and re-importing it into Google Keep is not guaranteed.
+Do not change data from another tab or device while Export is running. Unused labels and empty groups are included. Re-importing this ZIP into Google Keep is not guaranteed.
+
+### Restore from a MyKeep backup
+
+Open **Settings menu → Import → Restore from MyKeep backup**, select a ZIP, review the counts, and press **Start additive restore**. Selecting the ZIP does not write data. Existing notes are never deleted or overwritten; only missing note IDs are added. Repeating the same ZIP does not duplicate notes.
+
+Unused labels and empty groups are restored. Existing groups and labels with the same name are reused, and existing label memberships take precedence. Older version 1 ZIPs without group metadata restore flat labels. Notes that have been in Trash for seven days or longer are restored outside Trash, keeping their archive state.
+
+Images and PDFs are uploaded to R2 one at a time, retaining attachment IDs, filenames, MIME types and dates. Missing attachments can be retried only when the note's identity is verified. Missing files, failures and conflicts are reported; unavailable card images fall back to Auto. External preview images are restored as URLs only, because their image files are not included in the ZIP.
+
+The browser validates the ZIP. Limits: 4 GB compressed ZIP, 8 GB total uncompressed data, 100,000 entries, 64 MB for `notes.json`, and 20 MB per attachment. Retry the same ZIP after interruption or partial failure. Avoid editing the affected data from another tab or device during restore.
 
 ## PWA
 

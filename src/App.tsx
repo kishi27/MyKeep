@@ -5,6 +5,7 @@ import { backupFileName, createBackup } from "./exportBackup";
 import type { BackupProgress, BackupResult } from "./exportBackup";
 import { readKeepZip } from "./keepImport";
 import type { KeepZipResult } from "./keepImport";
+import { BackupRestorePanel } from "./BackupRestorePanel";
 import { displayLinkTitle, getLinkPreview, mergeLinkPreview } from "./linkPreview";
 import type { LinkPreview } from "./linkPreview";
 import { LANGUAGE_SETTING, LanguageContext, savedLanguage, useI18n, formatMessage } from "./i18n";
@@ -413,6 +414,7 @@ function MyKeep() {
     }
   }, [editingLabel, editingGroup]);
   const [importOpen, setImportOpen] = useState(false);
+  const [importKind, setImportKind] = useState<"keep" | "backup" | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [richLinkPreview, setRichLinkPreview] = useState(() => savedSetting(PREVIEW_SETTING, true));
   const [cardShowTitle, setCardShowTitle] = useState(() => savedSetting(CARD_TITLE_SETTING, true));
@@ -1684,7 +1686,7 @@ function MyKeep() {
             <button type="button" className="icon-button" aria-label={t("設定メニュー")} title={t("設定")} aria-expanded={settingsMenuOpen} aria-haspopup="menu" onClick={() => setSettingsMenuOpen((open) => !open)}><SettingsIcon /></button>
             {settingsMenuOpen && <div className="settings-dropdown" role="menu">
               <button type="button" role="menuitem" onClick={() => { setSettingsMenuOpen(false); setSettingsOpen(true); }}>{t("設定")}</button>
-              <button type="button" role="menuitem" onClick={() => { setSettingsMenuOpen(false); setImportOpen(true); }}>{t("インポート")}</button>
+              <button type="button" role="menuitem" onClick={() => { setSettingsMenuOpen(false); setImportKind(null); setImportOpen(true); }}>{t("インポート")}</button>
               <button type="button" role="menuitem" onClick={() => { setSettingsMenuOpen(false); setExportOpen(true); void exportAll(); }} disabled={exporting || importing}>{t("エクスポート")}</button>
             </div>}
           </div>
@@ -1912,9 +1914,15 @@ function MyKeep() {
       </div>}
 
       {importOpen && <div className="overlay" onMouseDown={(event) => { if (event.target === event.currentTarget && !importing) setImportOpen(false); }}>
-        <section className="utility-modal" role="dialog" aria-modal="true" aria-label={t("Google Keep インポート")}>
-          <div className="editor-heading"><h2>{t("Google Keep インポート")}</h2><button type="button" className="close" aria-label={t("閉じる")} onClick={() => setImportOpen(false)} disabled={importing}>×</button></div>
-          <div className="import-content">
+        <section className="utility-modal" role="dialog" aria-modal="true" aria-label={t("インポート")}>
+          <div className="editor-heading"><h2>{t("インポート")}</h2><button type="button" className="close" aria-label={t("閉じる")} onClick={() => setImportOpen(false)} disabled={importing}>×</button></div>
+          <div className="import-options">
+            <button type="button" aria-pressed={importKind === "keep"} disabled={importing || exporting} onClick={() => setImportKind("keep")}>Google Keep Takeout</button>
+            <button type="button" aria-pressed={importKind === "backup"} disabled={importing || exporting} onClick={() => setImportKind("backup")}>{t("MyKeepバックアップから復元")}</button>
+          </div>
+          {importKind === "backup" && <BackupRestorePanel busy={importing || exporting} onBusy={setImporting} onComplete={reloadList} />}
+          {importKind === "keep" && <div className="import-content">
+            <h3>{t("Google Keep インポート")}</h3>
             <label>{t("Takeout ZIPを選択")}
               <input type="file" accept=".zip,application/zip" onChange={importZip} disabled={importing || exporting} />
             </label>
@@ -1923,7 +1931,7 @@ function MyKeep() {
               {t("成功")} {countFormat.format(importProgress.notes.success)} / {t("ゴミ箱として取込")} {countFormat.format(importProgress.notes.trashed)} / {t("失敗")} {countFormat.format(importProgress.notes.failed)} / {t("スキップ")} {countFormat.format(importProgress.notes.skipped)}<br />
               {t("画像・添付")}: {countFormat.format(importProgress.attachments.done)} / {countFormat.format(importProgress.attachments.total)}<br />
               {t("成功")} {countFormat.format(importProgress.attachments.success)} / {t("失敗")} {countFormat.format(importProgress.attachments.failed)} / {t("スキップ")} {countFormat.format(importProgress.attachments.skipped)}</p>}
-          </div>
+          </div>}
         </section>
       </div>}
 
