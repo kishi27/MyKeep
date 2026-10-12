@@ -1,6 +1,32 @@
 :root { font-family: system-ui, "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif; color: #242424; background: #f8f8f6; }
 * { box-sizing: border-box; }
 body { margin: 0; }
+/* Applied synchronously by the lifecycle controller, before React can paint. */
+:root[data-pin-phase="locked"] #pin-content,
+:root[data-pin-phase="error"] #pin-content,
+:root[data-pin-hidden="true"] #pin-content { visibility: hidden !important; pointer-events: none !important; }
+#pin-privacy-shield { display: none; }
+:root[data-pin-hidden="true"] #pin-privacy-shield { display: block; position: fixed; inset: 0; z-index: 2147483647; background: #f8f8f6; }
+:root[data-pin-hidden="true"] .pin-screen { visibility: hidden; }
+.pin-screen { min-height: 100dvh; padding: max(20px, env(safe-area-inset-top)) 16px max(20px, env(safe-area-inset-bottom)); display: grid; place-items: center; }
+.pin-panel { width: min(100%, 340px); text-align: center; overflow-wrap: anywhere; }
+.pin-symbol { font-size: 2rem; margin-top: 16px; }
+.pin-dots { display: flex; justify-content: center; gap: 20px; font-size: 1.5rem; margin-bottom: 12px; }
+.pin-native-input { width: 100%; max-width: 160px; text-align: center; letter-spacing: 10px; padding: 8px; border: 1px solid #cecec8; border-radius: 8px; font-size: 16px; }
+.pin-keypad { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 14px auto; max-width: 260px; }
+.pin-keypad button { min-height: 52px; font-size: 1.4rem; }
+.pin-keypad button, .pin-settings button:not(.primary) { border: 1px solid #cecec8; border-radius: 8px; color: inherit; background: white; padding: 8px 12px; }
+.pin-help { font-size: .85rem; margin-top: 16px; text-align: left; line-height: 1.6; }
+.pin-settings { border-top: 1px solid #cecec8; padding-top: 10px; }
+.pin-settings > p { font-size: .88rem; }
+.pin-setup { display: grid; gap: 10px; margin-top: 10px; }
+.pin-setup h3 { margin: 0; font-size: 1rem; }
+.pin-setup label { display: grid; gap: 4px; }
+.pin-setup input { min-width: 0; width: 100%; border: 1px solid #cecec8; border-radius: 6px; padding: 8px; font-size: 16px; }
+.pin-setup-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+:root[data-theme="dark"] #pin-privacy-shield { background: #18191b; }
+:root[data-theme="dark"] .pin-keypad button, :root[data-theme="dark"] .pin-settings button:not(.primary),
+:root[data-theme="dark"] .pin-native-input, :root[data-theme="dark"] .pin-setup input { background: #282a2d; color: #f4f1e9; border-color: #55595d; }
 button, input, textarea { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: default; opacity: .55; }

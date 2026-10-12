@@ -6,6 +6,7 @@ import type { BackupProgress, BackupResult } from "./exportBackup";
 import { readKeepZip } from "./keepImport";
 import type { KeepZipResult } from "./keepImport";
 import { BackupRestorePanel } from "./BackupRestorePanel";
+import { PinGate, PinSettings } from "./MobilePinLock";
 import { displayLinkTitle, getLinkPreview, mergeLinkPreview } from "./linkPreview";
 import type { LinkPreview } from "./linkPreview";
 import { LANGUAGE_SETTING, LanguageContext, savedLanguage, useI18n, formatMessage } from "./i18n";
@@ -326,7 +327,7 @@ export default function App() {
     document.documentElement.lang = language;
     try { localStorage.setItem(LANGUAGE_SETTING, language); } catch { /* In-memory settings still work. */ }
   }, [language]);
-  return <LanguageContext.Provider value={{ language, setLanguage }}><MyKeep /></LanguageContext.Provider>;
+  return <LanguageContext.Provider value={{ language, setLanguage }}><PinGate><MyKeep /></PinGate></LanguageContext.Provider>;
 }
 
 function MyKeep() {
@@ -1803,6 +1804,7 @@ function MyKeep() {
           <label className="setting-row"><input type="checkbox" checked={cardShowTitle} onChange={(event) => setCardShowTitle(event.target.checked)} />{t("タイトル表示")}</label>
           <label className="setting-row"><input type="checkbox" checked={cardShowBody} onChange={(event) => setCardShowBody(event.target.checked)} />{t("本文表示")}</label>
           <label className="setting-row"><input type="checkbox" checked={darkMode} onChange={(event) => setDarkMode(event.target.checked)} />{t("ダークモード")}</label>
+          <PinSettings />
           <label className="setting-row">{t("自動更新間隔")}
             <select value={autoRefreshSeconds} onChange={(event) => {
               setAutoRefreshSeconds(REFRESH_SECONDS.find((seconds) => String(seconds) === event.target.value) ?? 30);

@@ -9,6 +9,15 @@ export function savedLanguage(): Language {
 
 // Japanese keys also serve as the original text for messages kept in component state.
 const english = {
+  "PINロック": "PIN Lock", "PINを設定": "Set PIN", "PINを変更": "Change PIN", "PINロックを解除": "Disable PIN Lock",
+  "現在のPIN": "Current PIN", "新しいPIN": "New PIN", "PINを再入力": "Confirm PIN",
+  "4桁のPINを入力してください": "Enter your 4-digit PIN", "PINが一致しません": "PINs do not match",
+  "PINが正しくありません": "Incorrect PIN", "数字キーボード": "Numeric keyboard", "1桁削除": "Delete one digit",
+  "PIN設定を更新しました。": "PIN settings updated.", "しばらく待ってから再試行してください。": "Please wait before trying again.",
+  "{0}秒後に再試行できます。": "Try again in {0} seconds.", "PIN設定を読み書きできません。": "PIN settings could not be read or saved.",
+  "スマホでMyKeepを開く際に4桁のPINで画面を保護します。": "Protect the MyKeep screen on your phone with a 4-digit PIN.",
+  "PINを忘れた場合": "Forgot your PIN?",
+  "この端末のブラウザ設定からMyKeepのサイトデータを削除するとPINを初期化できます。表示設定などのローカル設定も失われます。クラウドのメモは削除されません。": "Clear MyKeep site data in this device’s browser settings to reset the PIN. Local settings such as display preferences will also be lost. Notes in the cloud will not be deleted.",
   "MyKeepバックアップから復元": "Restore from MyKeep backup",
   "MyKeepバックアップZIPを選択": "Choose a MyKeep backup ZIP",
   "既存データは削除・上書きされません。": "Existing data will not be deleted or overwritten.",

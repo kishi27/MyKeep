@@ -302,6 +302,16 @@ Open the deployed HTTPS URL and sign in through Cloudflare Access before adding 
 
 The manifest requests ``standalone`` display. The Service Worker uses a minimal setup that loads page navigation from the network; it does not cache note data or images for offline use. An internet connection is required.
 
+### Phone PIN lock
+
+Settings shows “PIN Lock” only on iPhone and Android smartphones (off by default). It stays hidden on Windows and Mac, even in a narrow window. Enter a 4-digit PIN twice to enable it; canceling leaves it off. Changing or disabling the lock requires the current PIN.
+
+A new launch or reload requires the PIN. Going to another app or tab immediately hides the screen. Returning in **under 60 seconds resumes the previous screen; 60 seconds or longer locks it again**. Continued foreground use does not lock the app. At startup the notes UI and note requests do not start until unlocked. Web apps cannot fully control OS app-switcher snapshots.
+
+The device/browser’s `localStorage` stores a randomly salted PBKDF2 verifier. The plaintext PIN is never stored or sent, and PIN settings are excluded from backup ZIPs. Safari and home-screen PWAs may use separate storage and settings. Every five failed attempts introduces a wait of 30 seconds, increasing to at most 240 seconds; reloads retain the attempt count.
+
+This is a simple screen privacy feature, not encryption or a replacement for Cloudflare Access. Four digits are weak against brute force, and someone who can alter site data can bypass it. Bearer API KEY saves from iPhone Shortcuts and the Chrome extension are unaffected. If you forget the PIN, clear MyKeep site data in the browser settings. This also removes local display preferences, but does not delete cloud notes. Corrupt PIN settings or storage failures show an error rather than exposing notes.
+
 ## Security
 
 - **Web app**: Protect the entire host with Cloudflare Access, including normal APIs and attachment image URLs. Access must be configured in Cloudflare; the regular API does not have its own login flow.
