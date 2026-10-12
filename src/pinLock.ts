@@ -13,6 +13,12 @@ export function isSmartphone(nav: Pick<Navigator, "userAgent" | "platform"> = na
   return /iPhone/.test(nav.userAgent) || (/Android/.test(nav.userAgent) && /Mobile/.test(nav.userAgent));
 }
 export const smartphone = isSmartphone();
+export function pinDevice(): "iphone" | "android" | null {
+  if (/Android/.test(navigator.userAgent)) return "android";
+  if (/iPhone|iPad/.test(navigator.userAgent)
+    || /Mac/.test(navigator.platform) && navigator.maxTouchPoints > 1) return "iphone";
+  return null;
+}
 let record: PinRecord | null = null;
 let state: PinState = { phase: "unlocked", enabled: false, blockedUntil: 0, epoch: 0 };
 let hiddenAt: number | null = null;
@@ -72,11 +78,10 @@ function resume() {
 
 // Called by the entry module before createRoot: no app or note API has run yet.
 export function initializePinLock() {
-  if (!smartphone) return;
   try { document.documentElement.dataset.theme = localStorage.getItem("mykeep.darkMode") === "true" ? "dark" : "light"; } catch { /* load() below fails closed. */ }
   load();
   if (document.visibilityState !== "visible") hide();
-  // Finish lock/unmount before existing app focus/visibility listeners can fetch.
+  // Finish locking and suspend app effects before focus/visibility listeners fetch.
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") hide(); else flushSync(resume); });
   window.addEventListener("pagehide", hide);
   window.addEventListener("pageshow", () => flushSync(resume));
@@ -92,7 +97,8 @@ async function hashPin(pin: string, salt: string) {
 
 type PinResult = "ok" | "invalid" | "incorrect" | "wait" | "error";
 export async function pinOperation(action: "unlock" | "enable" | "change" | "disable", pin: string, nextPin = ""): Promise<PinResult> {
-  if (!smartphone || busy) return "wait";
+  // Device detection controls new enrollment, never protection of stored PINs.
+  if (busy || action === "enable" && !smartphone) return "wait";
   if (!/^\d{4}$/.test(pin) || (action === "change" && !/^\d{4}$/.test(nextPin))) return "invalid";
   busy = true;
   const epoch = state.epoch;

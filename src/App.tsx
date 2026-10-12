@@ -7,6 +7,7 @@ import { readKeepZip } from "./keepImport";
 import type { KeepZipResult } from "./keepImport";
 import { BackupRestorePanel } from "./BackupRestorePanel";
 import { PinGate, PinSettings } from "./MobilePinLock";
+import { pinSnapshot } from "./pinLock";
 import { displayLinkTitle, getLinkPreview, mergeLinkPreview } from "./linkPreview";
 import type { LinkPreview } from "./linkPreview";
 import { LANGUAGE_SETTING, LanguageContext, savedLanguage, useI18n, formatMessage } from "./i18n";
@@ -429,6 +430,7 @@ function MyKeep() {
   const pendingImagesRef = useRef<PendingImage[]>([]);
   const notesRef = useRef(notes);
   const lastListPathRef = useRef("");
+  const selectionListPathRef = useRef("");
   const refreshingRef = useRef(false);
   const loadingMoreRef = useRef(false);
   const moreControllerRef = useRef<AbortController | null>(null);
@@ -513,6 +515,9 @@ function MyKeep() {
     return () => { observer.disconnect(); cancelAnimationFrame(frame); };
   }, [notes, view, selecting, cardShowTitle, cardShowBody]);
   useEffect(() => {
+    const path = listPath(view, search, labelFilter, 0);
+    if (path === selectionListPathRef.current) return;
+    selectionListPathRef.current = path;
     setSelectedNoteIds(new Set());
     setSelecting(false);
     setBulkLabelsOpen(false);
@@ -526,7 +531,11 @@ function MyKeep() {
     });
   }, [notes]);
   useEffect(() => { pendingImagesRef.current = pendingImages; }, [pendingImages]);
-  useEffect(() => () => { pendingImagesRef.current.forEach((item) => URL.revokeObjectURL(item.previewUrl)); }, []);
+  useEffect(() => () => {
+    // Activity suspends effects when locked; the draft and its image URLs live
+    // until the editor is closed (clearPendingImages) or this page is discarded.
+    if (pinSnapshot().phase === "unlocked") pendingImagesRef.current.forEach((item) => URL.revokeObjectURL(item.previewUrl));
+  }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = darkMode ? "dark" : "light";
@@ -634,7 +643,7 @@ function MyKeep() {
     let active = true;
     let checking = false;
     async function checkForNewNotes() {
-      if (document.visibilityState !== "visible" || refreshingRef.current || loadingMoreRef.current || bulkWorkingRef.current || checking) return;
+      if (pinSnapshot().phase !== "unlocked" || document.visibilityState !== "visible" || refreshingRef.current || loadingMoreRef.current || bulkWorkingRef.current || checking) return;
       checking = true;
       const controller = new AbortController();
       checkControllerRef.current = controller;

@@ -5,6 +5,8 @@ body { margin: 0; }
 :root[data-pin-phase="locked"] #pin-content,
 :root[data-pin-phase="error"] #pin-content,
 :root[data-pin-hidden="true"] #pin-content { visibility: hidden !important; pointer-events: none !important; }
+:root[data-pin-phase="locked"] #pin-content,
+:root[data-pin-phase="error"] #pin-content { display: none !important; }
 #pin-privacy-shield { display: none; }
 :root[data-pin-hidden="true"] #pin-privacy-shield { display: block; position: fixed; inset: 0; z-index: 2147483647; background: #f8f8f6; }
 :root[data-pin-hidden="true"] .pin-screen { visibility: hidden; }

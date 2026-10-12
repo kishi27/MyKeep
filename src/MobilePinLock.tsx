@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { Activity, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 import { useI18n } from "./i18n";
-import { pinOperation, pinSnapshot, pinSubscribe, smartphone } from "./pinLock";
+import { pinDevice, pinOperation, pinSnapshot, pinSubscribe, smartphone } from "./pinLock";
 
 function usePin() { return useSyncExternalStore(pinSubscribe, pinSnapshot); }
 function useCooldown(until: number) {
@@ -16,7 +16,14 @@ function useCooldown(until: number) {
 }
 function PinHelp() {
   const { t } = useI18n();
-  return <details className="pin-help"><summary>{t("PINを忘れた場合")}</summary><p>{t("この端末のブラウザ設定からMyKeepのサイトデータを削除するとPINを初期化できます。表示設定などのローカル設定も失われます。クラウドのメモは削除されません。")}</p></details>;
+  const device = pinDevice();
+  return <details className="pin-help"><summary>{t("PINを忘れた場合")}</summary>
+    <p>{t("現在のPINが分かる場合は、設定から変更・OFFにできます。メモや表示設定は消えません。")}</p>
+    <p>{t("PINを忘れた場合、画面内から解除はできません。この端末に保存されたMyKeepの設定情報の初期化が必要です。表示設定やログイン状態も初期化される場合があります。")}</p>
+    <p><strong>{t("クラウドに保存されたメモ・画像・ラベルは削除されません。")}</strong></p>
+    {device !== "android" && <p>{t("iPhone：Safari通常タブでは、設定 → アプリ → Safari → 詳細 → WebサイトデータでMyKeepのドメインを確認してください。ホーム画面アプリは別の保存領域を使うため、一覧にない場合やSafari側の削除ではPINが残る場合があります。アプリの削除・再追加による初期化は実機未確認です。")}</p>}
+    {device !== "iphone" && <p>{t("Android：ChromeでMyKeepを開き、アドレスバーのページ情報 → CookieとサイトデータからMyKeepの保存情報を削除できます。ホーム画面アプリにも反映されるかは端末・ブラウザによるため、再起動して確認してください。アプリのアンインストールだけで初期化できるとは限りません。")}</p>}
+  </details>;
 }
 export function PinGate({ children }: { children: ReactNode }) {
   const state = usePin();
@@ -27,6 +34,10 @@ export function PinGate({ children }: { children: ReactNode }) {
   const input = useRef<HTMLInputElement>(null);
   const cooldown = useCooldown(state.blockedUntil);
   const attempt = useRef(false);
+  // Do not even pre-render the app before the first unlock. Later locks retain
+  // React state and File objects; Activity hides DOM and cleans up app effects.
+  const opened = useRef(false);
+  if (state.phase === "unlocked") opened.current = true;
   useEffect(() => { setDigits(""); setError(""); }, [state.epoch]);
   async function unlock(pin: string) {
     if (attempt.current || cooldown) return;
@@ -47,7 +58,10 @@ export function PinGate({ children }: { children: ReactNode }) {
   }
   return <>
     <div id="pin-privacy-shield" aria-hidden="true" />
-    {state.phase === "unlocked" ? <div id="pin-content">{children}</div> : <main className="pin-screen">
+    {opened.current && <Activity mode={state.phase === "unlocked" ? "visible" : "hidden"}>
+      <div id="pin-content" inert={state.phase !== "unlocked"} aria-hidden={state.phase !== "unlocked"}>{children}</div>
+    </Activity>}
+    {state.phase !== "unlocked" && <main className="pin-screen">
       <section className="pin-panel" aria-label={t("PINロック")}>
         <h1>MyKeep</h1><div className="pin-symbol" aria-hidden="true">🔒</div>
         {state.phase === "error" ? <p role="alert">{t("PIN設定を読み書きできません。")}</p> : <>
@@ -79,7 +93,7 @@ export function PinSettings() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const cooldown = useCooldown(state.blockedUntil);
-  if (!smartphone) return null;
+  if (!smartphone && !state.enabled) return null;
   function start(value: typeof mode) { setMode(value); setCurrent(""); setNext(""); setConfirm(""); setMessage(""); }
   async function save() {
     if (!mode || busy) return;

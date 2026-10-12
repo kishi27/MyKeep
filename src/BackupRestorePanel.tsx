@@ -3,6 +3,7 @@ import type { ChangeEvent } from "react";
 import { useI18n } from "./i18n";
 import { readBackupZip, restoreBackup } from "./restoreBackup";
 import type { RestoreArchive, RestoreProgress } from "./restoreBackup";
+import { pinSnapshot } from "./pinLock";
 
 export function BackupRestorePanel({ busy, onBusy, onComplete }: {
   busy: boolean; onBusy: (busy: boolean) => void; onComplete: () => void;
@@ -12,7 +13,10 @@ export function BackupRestorePanel({ busy, onBusy, onComplete }: {
   const [archive, setArchive] = useState<RestoreArchive | null>(null);
   const [message, setMessage] = useState("");
   const [progress, setProgress] = useState<RestoreProgress | null>(null);
-  useEffect(() => () => { void archiveRef.current?.close(); }, []);
+  useEffect(() => () => {
+    // Retain the selected ZIP when PIN locking suspends this panel's effects.
+    if (pinSnapshot().phase === "unlocked") void archiveRef.current?.close();
+  }, []);
 
   async function selectZip(event: ChangeEvent<HTMLInputElement>) {
     const file = event.currentTarget.files?.[0];

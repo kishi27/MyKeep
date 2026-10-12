@@ -306,11 +306,18 @@ The manifest requests ``standalone`` display. The Service Worker uses a minimal 
 
 Settings shows “PIN Lock” only on iPhone and Android smartphones (off by default). It stays hidden on Windows and Mac, even in a narrow window. Enter a 4-digit PIN twice to enable it; canceling leaves it off. Changing or disabling the lock requires the current PIN.
 
-A new launch or reload requires the PIN. Going to another app or tab immediately hides the screen. Returning in **under 60 seconds resumes the previous screen; 60 seconds or longer locks it again**. Continued foreground use does not lock the app. At startup the notes UI and note requests do not start until unlocked. Web apps cannot fully control OS app-switcher snapshots.
+A new launch or reload requires the PIN. Going to another app or tab immediately hides the screen. Returning in **under 60 seconds resumes the previous screen; 60 seconds or longer locks it again**. A registered PIN remains enforced even if desktop mode changes device detection. Continued foreground use does not lock the app. At startup the notes UI and note requests do not start until unlocked. Relocking hides the UI, disables interaction and suspends regular fetching, while keeping the draft and pending images in memory for the next unlock. Reloading or OS process termination loses unsaved changes. Web apps cannot fully control OS app-switcher snapshots.
 
 The device/browser’s `localStorage` stores a randomly salted PBKDF2 verifier. The plaintext PIN is never stored or sent, and PIN settings are excluded from backup ZIPs. Safari and home-screen PWAs may use separate storage and settings. Every five failed attempts introduces a wait of 30 seconds, increasing to at most 240 seconds; reloads retain the attempt count.
 
-This is a simple screen privacy feature, not encryption or a replacement for Cloudflare Access. Four digits are weak against brute force, and someone who can alter site data can bypass it. Bearer API KEY saves from iPhone Shortcuts and the Chrome extension are unaffected. If you forget the PIN, clear MyKeep site data in the browser settings. This also removes local display preferences, but does not delete cloud notes. Corrupt PIN settings or storage failures show an error rather than exposing notes.
+This is a simple screen privacy feature, not encryption or a replacement for Cloudflare Access. Four digits are weak against brute force, and someone who can alter site data can bypass it. Bearer API KEY saves from iPhone Shortcuts and the Chrome extension are unaffected. Corrupt PIN settings or storage failures show an error rather than exposing notes.
+
+#### Forgot your PIN?
+
+If you know the current PIN, change or disable it in Settings without losing notes or display preferences. There is no in-app reset for a forgotten PIN. Resetting MyKeep’s data stored on this device may also reset preferences and sign you out. **Notes, images and labels stored in Cloudflare D1/R2 will not be deleted.** Collapsed help is available on both the lock screen and Settings.
+
+- **iPhone**: For a Safari tab, look for MyKeep’s domain under Settings → Apps → Safari → Advanced → Website Data. Home-screen PWAs use separate storage: the domain may be missing from Safari’s list, or clearing Safari data may leave the PIN intact. Removing and re-adding the PWA has not been verified on a physical device and is not a guaranteed recovery procedure. ([Apple](https://support.apple.com/en-us/105082), [WebKit](https://webkit.org/blog/14787/webkit-features-in-safari-17-2/))
+- **Android**: In Chrome, open MyKeep and use Page info in the address bar → Cookies and site data to delete MyKeep’s stored data. Whether it also resets the home-screen PWA depends on the device/browser; reopen the app to check. Uninstalling alone is not a guaranteed reset. PWA recovery on both iPhone and Android remains unverified on physical devices. ([Chrome Help](https://support.google.com/chrome/answer/95647?hl=en&co=GENIE.Platform%3DAndroid))
 
 ## Security
 
