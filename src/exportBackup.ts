@@ -1,7 +1,7 @@
 import { BlobReader, BlobWriter, TextReader, ZipWriter } from "@zip.js/zip.js";
 import type { Attachment, Note } from "./types";
 
-type ExportView = "active" | "archived" | "trash";
+interface ExportCounts { notes: number; attachments: number; max_id: string | null }
 type BackupAttachment = Pick<Attachment, "id" | "filename" | "mime_type" | "created_at"> & { zip_path: string | null };
 interface ExportLabelGroup { id: string; name: string }
 interface ExportLabelDetail { name: string; group_id: string | null }
@@ -130,7 +130,11 @@ export async function createBackup(
   onProgress: (progress: BackupProgress) => void,
   fetcher: (path: string) => Promise<Response> = (path) => fetch(path),
 ): Promise<BackupResult> {
-  const counts = await getJson<{ notes: number; attachments: number }>("/api/export/counts", fetcher);
+  const counts = await getJson<ExportCounts>("/api/export/counts", fetcher);
+  if (!Number.isSafeInteger(counts.notes) || counts.notes < 0 || !Number.isSafeInteger(counts.attachments) || counts.attachments < 0
+    || (counts.notes > 0 ? typeof counts.max_id !== "string" || !counts.max_id : counts.max_id !== null)) {
+    throw new Error("バックアップ件数の応答が正しくありません。ページを再読み込みしてください。");
+  }
   const labelMetadata = validateLabelMetadata(await getJson<unknown>("/api/labels", fetcher));
   const progress: BackupProgress = {
     stage: "notes", notesDone: 0, notesTotal: counts.notes,
@@ -140,19 +144,18 @@ export async function createBackup(
   onProgress({ ...progress });
 
   const notes: Note[] = [];
-  const seen = new Set<string>();
-  for (const view of ["active", "archived", "trash"] satisfies ExportView[]) {
-    let offset = 0;
+  if (counts.max_id) {
+    let after = "";
     while (true) {
-      const page = await getJson<{ notes: Note[]; hasMore: boolean }>(`/api/notes?view=${view}&offset=${offset}`, fetcher);
-      if (!Array.isArray(page.notes) || (page.hasMore && !page.notes.length)) throw new Error("メモ一覧の応答が正しくありません。");
+      const params = new URLSearchParams({ after, through: counts.max_id });
+      const page = await getJson<{ notes: Note[]; hasMore: boolean }>(`/api/export/notes?${params}`, fetcher);
+      if (!Array.isArray(page.notes) || page.notes.length > 50 || typeof page.hasMore !== "boolean" || (page.hasMore && !page.notes.length)) throw new Error("メモ一覧の応答が正しくありません。");
       for (const note of page.notes) {
-        if (!seen.has(note.id)) {
-          notes.push(note);
-          seen.add(note.id);
-        }
+        if (typeof note.id !== "string" || note.id <= after || note.id > counts.max_id) throw new Error("メモ一覧の応答が正しくありません。");
+        notes.push(note);
+        after = note.id;
       }
-      offset += page.notes.length;
+      if (notes.length > counts.notes) throw new Error("バックアップ中にデータ件数が変わりました。編集・追加・削除を止めて、もう一度実行してください。");
       progress.notesDone = notes.length;
       onProgress({ ...progress });
       if (!page.hasMore) break;
@@ -161,6 +164,14 @@ export async function createBackup(
 
   progress.stage = "attachments";
   progress.attachmentsTotal = notes.reduce((sum, note) => sum + note.attachments.length, 0);
+  const verifyCounts = async () => {
+    const latest = await getJson<ExportCounts>("/api/export/counts", fetcher);
+    if (notes.length !== counts.notes || progress.attachmentsTotal !== counts.attachments
+      || latest.notes !== counts.notes || latest.attachments !== counts.attachments || latest.max_id !== counts.max_id) {
+      throw new Error("バックアップ中にデータ件数が変わりました。編集・追加・削除を止めて、もう一度実行してください。");
+    }
+  };
+  await verifyCounts();
   onProgress({ ...progress });
 
   const writer = new ZipWriter<Blob | undefined>(output, { useWebWorkers: false, bufferedWrite: false, useUnicodeFileNames: true });
@@ -204,6 +215,7 @@ export async function createBackup(
 
   progress.stage = "zip";
   onProgress({ ...progress });
+  await verifyCounts();
   await writer.add("notes.json", new TextReader(JSON.stringify({
     format: "mykeep-backup", version: 1, exported_at: new Date().toISOString(),
     label_groups: labelMetadata.groups, label_group_memberships: labelMetadata.memberships,

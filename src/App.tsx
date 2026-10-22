@@ -8,7 +8,7 @@ import type { KeepZipResult } from "./keepImport";
 import { BackupRestorePanel } from "./BackupRestorePanel";
 import { PinGate, PinSettings } from "./MobilePinLock";
 import { pinSnapshot } from "./pinLock";
-import { displayLinkTitle, getLinkPreview, mergeLinkPreview } from "./linkPreview";
+import { canRetryLinkPreview, displayLinkTitle, getLinkPreview, mergeLinkPreview } from "./linkPreview";
 import type { LinkPreview } from "./linkPreview";
 import { LANGUAGE_SETTING, LanguageContext, savedLanguage, useI18n, formatMessage } from "./i18n";
 import type { Language, MessageKey } from "./i18n";
@@ -456,6 +456,17 @@ function MyKeep() {
   const deepLinkNoteRef = useRef(new URL(window.location.href).searchParams.get("note"));
 
   useEffect(() => {
+    if (!draft) return;
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (JSON.stringify({ draft, labels: selectedLabels }) === editorBaselineRef.current && pendingImagesRef.current.length === 0) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [draft, selectedLabels]);
+
+  useEffect(() => {
     if (!undoAction || undoing) return;
     const timer = window.setTimeout(() => setUndoAction(null), 5000);
     return () => window.clearTimeout(timer);
@@ -783,12 +794,28 @@ function MyKeep() {
   useEffect(() => {
     if (!richLinkPreview) return;
     let active = true;
-    for (const url of new Set(notes.map((note) => note.url).filter(Boolean))) {
+    const urls = new Set(notes.map((note) => note.url).filter(Boolean));
+    const fetchPreview = (url: string) => {
+      if (document.visibilityState !== "visible" || !navigator.onLine || pinSnapshot().phase !== "unlocked") return;
       void getLinkPreview(url).then((preview) => {
         if (active) setPreviews((current) => current[url] === preview ? current : { ...current, [url]: preview });
       });
-    }
-    return () => { active = false; };
+    };
+    for (const url of urls) fetchPreview(url);
+    const retryFailed = () => {
+      if (document.visibilityState !== "visible" || !navigator.onLine || pinSnapshot().phase !== "unlocked") return;
+      for (const url of urls) if (canRetryLinkPreview(url)) fetchPreview(url);
+    };
+    const timer = window.setInterval(retryFailed, 30_000);
+    const resumePreviews = () => { for (const url of urls) fetchPreview(url); };
+    window.addEventListener("online", resumePreviews);
+    document.addEventListener("visibilitychange", resumePreviews);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener("online", resumePreviews);
+      document.removeEventListener("visibilitychange", resumePreviews);
+    };
   }, [notes, richLinkPreview]);
 
   useEffect(() => {

@@ -625,9 +625,25 @@ async function renameLabel(request: Request, env: Env): Promise<Response> {
 
 async function exportCounts(env: Env): Promise<Response> {
   const counts = await env.DB.prepare(
-    "SELECT (SELECT COUNT(*) FROM notes) AS notes, (SELECT COUNT(*) FROM attachments) AS attachments",
-  ).first<{ notes: number; attachments: number }>();
-  return json({ notes: counts?.notes ?? 0, attachments: counts?.attachments ?? 0 });
+    "SELECT (SELECT COUNT(*) FROM notes) AS notes, (SELECT COUNT(*) FROM attachments) AS attachments, (SELECT MAX(id) FROM notes) AS max_id",
+  ).first<{ notes: number; attachments: number; max_id: string | null }>();
+  return json({ notes: counts?.notes ?? 0, attachments: counts?.attachments ?? 0, max_id: counts?.max_id ?? null });
+}
+
+async function exportNotes(request: Request, env: Env): Promise<Response> {
+  const params = new URL(request.url).searchParams;
+  const after = params.get("after") ?? "";
+  const through = params.get("through");
+  if (!isStrictUuid(through) || (after !== "" && !isStrictUuid(after)) || after > through) {
+    return json({ error: "一覧の指定が正しくありません。" }, 400);
+  }
+  // Immutable IDs span active, archived and trashed notes in one traversal.
+  // Edits and state changes cannot move a note across page boundaries.
+  const result = await env.DB.prepare(`${SELECT_NOTE} WHERE id > ? AND id <= ? ORDER BY id LIMIT ?`)
+    .bind(after, through, PAGE_SIZE + 1).all<NoteRow>();
+  const rows = result.results ?? [];
+  const page = rows.slice(0, PAGE_SIZE);
+  return json({ notes: await withRelations(page, env), hasMore: rows.length > PAGE_SIZE });
 }
 
 function relationStatements(noteId: string, input: NoteInput, env: Env, replace: boolean, existingLabelsOnly = false, expectedVersion?: string): D1PreparedStatement[] {
@@ -1255,6 +1271,9 @@ export default {
 
       if (url.pathname === "/api/export/counts" && request.method === "GET") {
         return await exportCounts(env);
+      }
+      if (url.pathname === "/api/export/notes" && request.method === "GET") {
+        return await exportNotes(request, env);
       }
 
       if (url.pathname === "/api/import/keep" && request.method === "POST") {

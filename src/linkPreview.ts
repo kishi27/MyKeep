@@ -43,7 +43,10 @@ export function mergeLinkPreview(note: Note, dynamic?: LinkPreview | null): Link
   };
 }
 
-const cache = new Map<string, Promise<LinkPreview | null>>();
+type CacheEntry = { promise: Promise<LinkPreview | null>; attempts: number; retryAt: number };
+const cache = new Map<string, CacheEntry>();
+// At most three attempts per URL per page lifetime, shared by all callers.
+const RETRY_DELAYS = [60_000, 300_000];
 const queue: Array<() => void> = [];
 let active = 0;
 
@@ -57,10 +60,12 @@ function runNext(): void {
 function queuedPreview(url: string): Promise<LinkPreview | null> {
   return new Promise((resolve) => {
     queue.push(() => {
-      fetch(`/api/link-preview?url=${encodeURIComponent(url)}`)
+      fetch(`/api/link-preview?url=${encodeURIComponent(url)}`, { signal: AbortSignal.timeout(15_000) })
         .then(async (response) => {
           if (!response.ok) return null;
-          return await response.json() as LinkPreview;
+          const value = await response.json();
+          return value && typeof value === "object" && ["title", "description", "image", "hostname"].every((key) => typeof (value as Record<string, unknown>)[key] === "string")
+            ? value as LinkPreview : null;
         })
         .then(resolve, () => resolve(null))
         .finally(() => {
@@ -73,10 +78,18 @@ function queuedPreview(url: string): Promise<LinkPreview | null> {
 }
 
 export function getLinkPreview(url: string): Promise<LinkPreview | null> {
-  let pending = cache.get(url);
-  if (!pending) {
-    pending = queuedPreview(url);
-    cache.set(url, pending);
-  }
-  return pending;
+  const previous = cache.get(url);
+  if (previous && !canRetryLinkPreview(url)) return previous.promise;
+  const entry: CacheEntry = { promise: Promise.resolve(null), attempts: (previous?.attempts ?? 0) + 1, retryAt: Infinity };
+  cache.set(url, entry);
+  entry.promise = queuedPreview(url).then((preview) => {
+    if (!preview && entry.attempts <= RETRY_DELAYS.length) entry.retryAt = Date.now() + RETRY_DELAYS[entry.attempts - 1];
+    return preview;
+  });
+  return entry.promise;
+}
+
+export function canRetryLinkPreview(url: string): boolean {
+  const entry = cache.get(url);
+  return !!entry && Date.now() >= entry.retryAt;
 }
