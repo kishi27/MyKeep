@@ -630,29 +630,37 @@ async function exportCounts(env: Env): Promise<Response> {
   return json({ notes: counts?.notes ?? 0, attachments: counts?.attachments ?? 0 });
 }
 
-function relationStatements(noteId: string, input: NoteInput, env: Env, replace: boolean, existingLabelsOnly = false): D1PreparedStatement[] {
+function relationStatements(noteId: string, input: NoteInput, env: Env, replace: boolean, existingLabelsOnly = false, expectedVersion?: string): D1PreparedStatement[] {
   const statements: D1PreparedStatement[] = [];
+  // All relation writes share the same version guard as the final note update,
+  // inside one D1 batch transaction. A stale save changes nothing.
+  const guard = expectedVersion === undefined ? "" : " AND EXISTS (SELECT 1 FROM notes WHERE id = ? AND updated_at = ? AND deleted_at IS NULL)";
+  const versionBindings = expectedVersion === undefined ? [] : [noteId, expectedVersion];
+  const valuesSource = (placeholders: string, columns: number) => expectedVersion === undefined
+    ? `VALUES ${placeholders}`
+    : `SELECT ${Array.from({ length: columns }, (_, index) => `column${index + 1}`).join(",")} FROM (VALUES ${placeholders}) WHERE 1=1${guard}`;
   if (input.checklist !== undefined) {
-    if (replace) statements.push(env.DB.prepare("DELETE FROM checklist_items WHERE note_id = ?").bind(noteId));
-    for (let start = 0; start < input.checklist.length; start += 20) {
-      const values = input.checklist.slice(start, start + 20);
+    if (replace) statements.push(env.DB.prepare(`DELETE FROM checklist_items WHERE note_id = ?${guard}`).bind(noteId, ...versionBindings));
+    for (let start = 0; start < input.checklist.length; start += 19) {
+      const values = input.checklist.slice(start, start + 19);
       const placeholders = values.map(() => "(?, ?, ?, ?, ?)").join(",");
       const bindings = values.flatMap((item, index) => [crypto.randomUUID(), noteId, start + index, item.text, Number(item.checked)]);
       statements.push(env.DB.prepare(
-        `INSERT INTO checklist_items (id, note_id, position, text, checked) VALUES ${placeholders}`,
-      ).bind(...bindings));
+        `INSERT INTO checklist_items (id, note_id, position, text, checked) ${valuesSource(placeholders, 5)}`,
+      ).bind(...bindings, ...versionBindings));
     }
   }
   if (input.labels !== undefined) {
-    if (replace) statements.push(env.DB.prepare("DELETE FROM note_labels WHERE note_id = ?").bind(noteId));
-    if (input.labels.length) {
-      const placeholders = input.labels.map(() => "(?, ?)").join(",");
+    if (replace) statements.push(env.DB.prepare(`DELETE FROM note_labels WHERE note_id = ?${guard}`).bind(noteId, ...versionBindings));
+    for (let start = 0; start < input.labels.length; start += 40) {
+      const labels = input.labels.slice(start, start + 40);
+      const placeholders = labels.map(() => "(?, ?)").join(",");
       if (!existingLabelsOnly) {
-        statements.push(env.DB.prepare(`INSERT OR IGNORE INTO labels (name_key, name) VALUES ${placeholders}`)
-          .bind(...input.labels.flatMap((name) => [labelKey(name), name])));
+        statements.push(env.DB.prepare(`INSERT OR IGNORE INTO labels (name_key, name) ${valuesSource(placeholders, 2)}`)
+          .bind(...labels.flatMap((name) => [labelKey(name), name]), ...versionBindings));
       }
-      statements.push(env.DB.prepare(`INSERT INTO note_labels (note_id, label_key) VALUES ${placeholders}`)
-        .bind(...input.labels.flatMap((name) => [noteId, labelKey(name)])));
+      statements.push(env.DB.prepare(`INSERT INTO note_labels (note_id, label_key) ${valuesSource(placeholders, 2)}`)
+        .bind(...labels.flatMap((name) => [noteId, labelKey(name)]), ...versionBindings));
     }
   }
   return statements;
@@ -705,18 +713,27 @@ async function importKeepNote(request: Request, env: Env): Promise<Response> {
 async function updateNote(id: string, request: Request, env: Env): Promise<Response> {
   const current = await env.DB.prepare(`${SELECT_NOTE} WHERE id = ? AND deleted_at IS NULL`).bind(id).first<NoteRow>();
   if (!current) return json({ error: "メモが見つかりません。" }, 404);
-  const input = parseInput(await readInput(request), current);
+  const value = await readInput(request);
+  const expected = value && typeof value === "object" ? (value as Record<string, unknown>).expected_updated_at : undefined;
+  if (expected !== undefined && (typeof expected !== "string" || !Number.isFinite(Date.parse(expected)))) {
+    return json({ error: "更新日時を確認してください。" }, 400);
+  }
+  const conflict = () => json({ error: "別の画面でこのメモが更新されています。入力内容を控えてから、メモを開き直してください。" }, 409);
+  if (expected !== undefined && expected !== current.updated_at) return conflict();
+  const input = parseInput(value, current);
   if (!input) return json({ error: "メモの内容を確認してください。" }, 400);
   if (!await validCardImage(input, env, id)) return json({ error: "カード画像を確認してください。" }, 400);
 
-  const now = new Date().toISOString();
-  await env.DB.batch([env.DB.prepare(
-    "UPDATE notes SET title = ?, body = ?, url = ?, pinned = ?, archived = ?, color = ?, updated_at = ?, preview_title = ?, preview_description = ?, preview_image = ?, preview_hostname = ?, card_image = ? WHERE id = ? AND deleted_at IS NULL",
+  const now = new Date(Math.max(Date.now(), Date.parse(current.updated_at) + 1)).toISOString();
+  const results = await env.DB.batch([...relationStatements(id, input, env, true, false, current.updated_at), env.DB.prepare(
+    "UPDATE notes SET title = ?, body = ?, url = ?, pinned = ?, archived = ?, color = ?, updated_at = ?, preview_title = ?, preview_description = ?, preview_image = ?, preview_hostname = ?, card_image = ? WHERE id = ? AND deleted_at IS NULL AND updated_at = ?",
   ).bind(input.title, input.body, input.url, Number(input.pinned), Number(input.archived), input.color, now,
-    input.preview_title, input.preview_description, input.preview_image, input.preview_hostname, input.card_image, id),
-  ...relationStatements(id, input, env, true)]);
+    input.preview_title, input.preview_description, input.preview_image, input.preview_hostname, input.card_image, id, current.updated_at)]);
+  if (!results[results.length - 1].meta.changes) return conflict();
   const row = await env.DB.prepare(`${SELECT_NOTE} WHERE id = ?`).bind(id).first<NoteRow>();
-  return json({ note: (await withRelations([row!], env))[0] });
+  if (!row) return json({ error: "メモが見つかりません。" }, 404);
+  // Do not acknowledge a later writer's version if it raced the response read.
+  return json({ note: { ...(await withRelations([row], env))[0], updated_at: now } });
 }
 
 async function moveToTrash(id: string, request: Request, env: Env): Promise<Response> {
@@ -1151,16 +1168,19 @@ async function getAttachment(noteId: string, attachmentId: string, env: Env): Pr
 
 async function deleteAttachment(noteId: string, attachmentId: string, env: Env): Promise<Response> {
   const row = await env.DB.prepare(
-    "SELECT a.r2_key FROM attachments a JOIN notes n ON n.id = a.note_id WHERE a.id = ? AND a.note_id = ? AND n.deleted_at IS NULL",
-  ).bind(attachmentId, noteId).first<{ r2_key: string }>();
+    "SELECT a.r2_key, n.updated_at FROM attachments a JOIN notes n ON n.id = a.note_id WHERE a.id = ? AND a.note_id = ? AND n.deleted_at IS NULL",
+  ).bind(attachmentId, noteId).first<{ r2_key: string; updated_at: string }>();
   if (!row) return json({ error: "画像が見つかりません。" }, 404);
   await env.IMAGES.delete(row.r2_key);
-  await env.DB.batch([
-    env.DB.prepare("UPDATE notes SET card_image = 'auto', updated_at = ? WHERE id = ? AND card_image = ?")
-      .bind(new Date().toISOString(), noteId, `attachment:${attachmentId}`),
+  const results = await env.DB.batch([
+    env.DB.prepare("SELECT updated_at FROM notes WHERE id = ?").bind(noteId),
+    env.DB.prepare("UPDATE notes SET card_image = CASE WHEN card_image = ? THEN 'auto' ELSE card_image END, updated_at = ? WHERE id = ? RETURNING updated_at")
+      .bind(`attachment:${attachmentId}`, new Date(Math.max(Date.now(), Date.parse(row.updated_at) + 1)).toISOString(), noteId),
     env.DB.prepare("DELETE FROM attachments WHERE id = ? AND note_id = ?").bind(attachmentId, noteId),
   ]);
-  return json({ ok: true });
+  return json({ ok: true,
+    previous_updated_at: (results[0].results[0] as { updated_at: string } | undefined)?.updated_at,
+    updated_at: (results[1].results[0] as { updated_at: string } | undefined)?.updated_at });
 }
 
 export default {

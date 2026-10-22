@@ -9,6 +9,9 @@ export function savedLanguage(): Language {
 
 // Japanese keys also serve as the original text for messages kept in component state.
 const english = {
+  "保存していない変更があります。保存せずに閉じますか？": "You have unsaved changes. Close without saving?",
+  "別の画面でこのメモが更新されています。入力内容を控えてから、メモを開き直してください。": "This note was updated in another window or device. Copy your unsaved changes, then reopen the note.",
+  "更新日時を確認してください。": "Please check the update timestamp.",
   "PINロック": "PIN Lock", "PINを設定": "Set PIN", "PINを変更": "Change PIN", "PINロックを解除": "Disable PIN Lock",
   "現在のPIN": "Current PIN", "新しいPIN": "New PIN", "PINを再入力": "Confirm PIN",
   "4桁のPINを入力してください": "Enter your 4-digit PIN", "PINが一致しません": "PINs do not match",

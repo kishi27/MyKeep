@@ -336,6 +336,13 @@ function MyKeep() {
   const countFormat = new Intl.NumberFormat(locale);
   const [view, setView] = useState<View>("active");
   const [search, setSearch] = useState("");
+  const [searchInput, setSearchInput] = useState("");
+  const [searchComposing, setSearchComposing] = useState(false);
+  useEffect(() => {
+    if (searchComposing) return;
+    const timer = window.setTimeout(() => setSearch(searchInput), 350);
+    return () => window.clearTimeout(timer);
+  }, [searchInput, searchComposing]);
   const [labelFilter, setLabelFilter] = useState("");
   const [availableLabels, setAvailableLabels] = useState<string[]>([]);
   const [labelGroups, setLabelGroups] = useState<LabelGroup[]>([]);
@@ -368,6 +375,8 @@ function MyKeep() {
   const [reload, setReload] = useState(0);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<NoteDraft | null>(null);
+  const editorBaselineRef = useRef("");
+  const editorVersionRef = useRef<string | null>(null);
   const [selectedLabels, setSelectedLabels] = useState<string[]>([]);
   const [labelMenuOpen, setLabelMenuOpen] = useState(false);
   const [creatingLabel, setCreatingLabel] = useState(false);
@@ -823,6 +832,13 @@ function MyKeep() {
     setDraggingImage(false);
   }
 
+  function requestCloseEditor() {
+    const changed = draft && (JSON.stringify({ draft, labels: selectedLabels }) !== editorBaselineRef.current
+      || pendingImagesRef.current.length > 0);
+    if (changed && !window.confirm(t("保存していない変更があります。保存せずに閉じますか？"))) return;
+    closeEditor();
+  }
+
   function openEditor(note?: Note) {
     setViewerImageId(null);
     setError("");
@@ -834,11 +850,14 @@ function MyKeep() {
     setLabelMenuOpen(false);
     setCreatingLabel(false);
     setNewLabelName("");
-    setDraft(note
+    const nextDraft: NoteDraft = note
       ? { title: note.title, body: note.body, url: note.url, pinned: note.pinned, archived: note.archived, color: note.color,
         card_image: note.card_image ?? "auto",
         checklist: note.checklist.map(({ text, checked }) => ({ text, checked })) }
-      : { ...emptyNote, archived: view === "archived" });
+      : { ...emptyNote, archived: view === "archived" };
+    setDraft(nextDraft);
+    editorBaselineRef.current = JSON.stringify({ draft: nextDraft, labels: note?.labels ?? [] });
+    editorVersionRef.current = note?.updated_at ?? null;
   }
 
   function toggleLabel(name: string) {
@@ -1064,6 +1083,7 @@ function MyKeep() {
     setView("active");
     setLabelFilter("");
     setSearch("");
+    setSearchInput("");
     setMenuOpen(false);
     setSettingsMenuOpen(false);
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -1139,10 +1159,12 @@ function MyKeep() {
         ? images[0].file.name.replace(/\.[^.]+$/, "") || "画像メモ" : draft.title;
       const input = { ...draft, title, labels: selectedLabels };
       const { note } = editingId
-        ? await api<{ note: Note }>(`/api/notes/${editingId}`, { method: "PATCH", body: JSON.stringify(input) })
+        ? await api<{ note: Note }>(`/api/notes/${editingId}`, { method: "PATCH", body: JSON.stringify({ ...input, expected_updated_at: editorVersionRef.current }) })
         : await api<{ note: Note }>("/api/notes", { method: "POST", body: JSON.stringify(input) });
       setDraft((current) => current ? { ...current, card_image: note.card_image } : current);
       setEditorPreviewImage(note.preview_image);
+      editorVersionRef.current = note.updated_at;
+      editorBaselineRef.current = JSON.stringify({ draft: { ...draft, title, card_image: note.card_image }, labels: selectedLabels });
       if (!editingId) {
         setEditingId(note.id);
         setDraft((current) => current ? { ...current, title } : current);
@@ -1486,7 +1508,8 @@ function MyKeep() {
     setWorking(true);
     setError("");
     try {
-      await api(`/api/notes/${editingId}/attachments/${attachment.id}`, { method: "DELETE" });
+      const deleted = await api<{ previous_updated_at: string; updated_at: string }>(`/api/notes/${editingId}/attachments/${attachment.id}`, { method: "DELETE" });
+      if (deleted.updated_at && editorVersionRef.current === deleted.previous_updated_at) editorVersionRef.current = deleted.updated_at;
       setEditorAttachments((current) => current.filter((item) => item.id !== attachment.id));
       setDraft((current) => current?.card_image === `attachment:${attachment.id}` ? { ...current, card_image: "auto" } : current);
       setNotes((current) => current.map((note) => note.id === editingId
@@ -1683,8 +1706,8 @@ function MyKeep() {
         <div className="search-field">
           <label htmlFor="note-search">{t("検索")}</label>
           <div className="search-input-wrap">
-            <input id="note-search" ref={searchInputRef} type="search" value={search} maxLength={200} placeholder={t("タイトル・本文・URL")} onChange={(event) => setSearch(event.target.value)} />
-            {search.length > 0 && <button type="button" className="search-clear" aria-label={t("検索をクリア")} title={t("検索をクリア")} onClick={() => { setSearch(""); searchInputRef.current?.focus(); }}>×</button>}
+            <input id="note-search" ref={searchInputRef} type="search" value={searchInput} maxLength={200} placeholder={t("タイトル・本文・URL")} onCompositionStart={() => setSearchComposing(true)} onCompositionEnd={() => setSearchComposing(false)} onChange={(event) => setSearchInput(event.target.value)} />
+            {searchInput.length > 0 && <button type="button" className="search-clear" aria-label={t("検索をクリア")} title={t("検索をクリア")} onClick={() => { setSearchInput(""); setSearch(""); searchInputRef.current?.focus(); }}>×</button>}
           </div>
         </div>
         <div className="header-actions">
@@ -1960,11 +1983,11 @@ function MyKeep() {
       </div>}
 
       {draft && (
-        <div className="overlay" onMouseDown={(event) => { if (event.target === event.currentTarget && !working) closeEditor(); }}>
+        <div className="overlay" onMouseDown={(event) => { if (event.target === event.currentTarget && !working) requestCloseEditor(); }}>
           <form className="editor" data-color={draft.color} onSubmit={save} onPaste={pasteImages} aria-label={editingId ? t("メモを編集") : t("新規メモ")}>
             <div className="editor-heading">
               <h2>{editingId ? t("メモを編集") : t("新規メモ")}</h2>
-              <button type="button" className="close" onClick={closeEditor} disabled={working} aria-label={t("閉じる")}>×</button>
+              <button type="button" className="close" onClick={requestCloseEditor} disabled={working} aria-label={t("閉じる")}>×</button>
             </div>
             {error && <p className="error" role="alert">{uiMessage(error)}</p>}
             <label>{t("タイトル")}<input value={draft.title} maxLength={300} onChange={(event) => setDraft({ ...draft, title: event.target.value })} /></label>
