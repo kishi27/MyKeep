@@ -1,7 +1,7 @@
 import { BlobReader, BlobWriter, TextReader, ZipWriter } from "@zip.js/zip.js";
 import type { Attachment, Note } from "./types";
 
-interface ExportCounts { notes: number; attachments: number; max_id: string | null }
+interface ExportCounts { notes: number; attachments: number; max_id: string | null; revision: number }
 type BackupAttachment = Pick<Attachment, "id" | "filename" | "mime_type" | "created_at"> & { zip_path: string | null };
 interface ExportLabelGroup { id: string; name: string }
 interface ExportLabelDetail { name: string; group_id: string | null }
@@ -131,7 +131,8 @@ export async function createBackup(
   fetcher: (path: string) => Promise<Response> = (path) => fetch(path),
 ): Promise<BackupResult> {
   const counts = await getJson<ExportCounts>("/api/export/counts", fetcher);
-  if (!Number.isSafeInteger(counts.notes) || counts.notes < 0 || !Number.isSafeInteger(counts.attachments) || counts.attachments < 0
+  if (!Number.isSafeInteger(counts.revision) || counts.revision < 0
+    || !Number.isSafeInteger(counts.notes) || counts.notes < 0 || !Number.isSafeInteger(counts.attachments) || counts.attachments < 0
     || (counts.notes > 0 ? typeof counts.max_id !== "string" || !counts.max_id : counts.max_id !== null)) {
     throw new Error("バックアップ件数の応答が正しくありません。ページを再読み込みしてください。");
   }
@@ -155,7 +156,7 @@ export async function createBackup(
         notes.push(note);
         after = note.id;
       }
-      if (notes.length > counts.notes) throw new Error("バックアップ中にデータ件数が変わりました。編集・追加・削除を止めて、もう一度実行してください。");
+      if (notes.length > counts.notes) throw new Error("バックアップ中にデータが変更されました。編集・追加・削除を止めて、もう一度実行してください。");
       progress.notesDone = notes.length;
       onProgress({ ...progress });
       if (!page.hasMore) break;
@@ -167,8 +168,9 @@ export async function createBackup(
   const verifyCounts = async () => {
     const latest = await getJson<ExportCounts>("/api/export/counts", fetcher);
     if (notes.length !== counts.notes || progress.attachmentsTotal !== counts.attachments
-      || latest.notes !== counts.notes || latest.attachments !== counts.attachments || latest.max_id !== counts.max_id) {
-      throw new Error("バックアップ中にデータ件数が変わりました。編集・追加・削除を止めて、もう一度実行してください。");
+      || latest.notes !== counts.notes || latest.attachments !== counts.attachments || latest.max_id !== counts.max_id
+      || latest.revision !== counts.revision) {
+      throw new Error("バックアップ中にデータが変更されました。編集・追加・削除を止めて、もう一度実行してください。");
     }
   };
   await verifyCounts();

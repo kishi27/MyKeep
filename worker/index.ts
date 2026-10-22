@@ -289,6 +289,12 @@ async function withRelations(rows: NoteRow[], env: Env): Promise<Note[]> {
 
 function noteListFilter(params: URLSearchParams) {
   const view = params.get("view") ?? "active";
+  const sort = params.get("sort");
+  const sorts: Record<string, string> = {
+    updated_desc: "updated_at DESC, id DESC", updated_asc: "updated_at ASC, id ASC",
+    created_desc: "created_at DESC, id DESC", created_asc: "created_at ASC, id ASC",
+  };
+  if (sort !== null && !Object.hasOwn(sorts, sort)) return null;
   const query = params.get("q")?.trim() ?? "";
   const label = params.get("label")?.trim() ?? "";
   if ((view !== "active" && view !== "pinned" && view !== "unpinned" && view !== "unlabeled" && view !== "imageless" && view !== "archived" && view !== "trash")
@@ -316,9 +322,15 @@ function noteListFilter(params: URLSearchParams) {
     conditions.push("EXISTS (SELECT 1 FROM note_labels nl WHERE nl.note_id = notes.id AND nl.label_key = ?)");
     bindings.push(labelKey(label));
   }
-  const order = view === "trash" ? "deleted_at DESC, id DESC"
-    : view === "pinned" || view === "unpinned" ? "updated_at DESC, id DESC" : "pinned DESC, updated_at DESC, id DESC";
+  const dateOrder = sort === null ? (view === "trash" ? "deleted_at DESC, id DESC" : sorts.updated_desc) : sorts[sort];
+  const order = view === "trash" || view === "pinned" || view === "unpinned" ? dateOrder : `pinned DESC, ${dateOrder}`;
   return { where: conditions.join(" AND "), bindings, order };
+}
+
+async function dataRevision(env: Env): Promise<number> {
+  const row = await env.DB.prepare("SELECT revision FROM data_revision WHERE id = 1").first<{ revision: number }>();
+  if (!row) throw new Error("missing_data_revision");
+  return row.revision;
 }
 
 async function listNotes(request: Request, env: Env): Promise<Response> {
@@ -328,21 +340,24 @@ async function listNotes(request: Request, env: Env): Promise<Response> {
   if (!filter || !Number.isSafeInteger(offset) || offset < 0) {
     return json({ error: "一覧の指定が正しくありません。" }, 400);
   }
+  // Capture before reading: a concurrent mutation remains visible to the next check.
+  const revision = await dataRevision(env);
   const result = await env.DB.prepare(
     `${SELECT_NOTE} WHERE ${filter.where} ORDER BY ${filter.order} LIMIT ? OFFSET ?`,
   ).bind(...filter.bindings, PAGE_SIZE + 1, offset).all<NoteRow>();
   const rows = result.results ?? [];
   const page = rows.slice(0, PAGE_SIZE);
-  return json({ notes: await withRelations(page, env), hasMore: rows.length > PAGE_SIZE });
+  return json({ notes: await withRelations(page, env), hasMore: rows.length > PAGE_SIZE, revision });
 }
 
 async function checkNotes(request: Request, env: Env): Promise<Response> {
   const filter = noteListFilter(new URL(request.url).searchParams);
   if (!filter) return json({ error: "一覧の指定が正しくありません。" }, 400);
+  const revision = await dataRevision(env);
   const result = await env.DB.prepare(
     `SELECT id, updated_at FROM notes WHERE ${filter.where} ORDER BY ${filter.order} LIMIT ?`,
   ).bind(...filter.bindings, PAGE_SIZE).all<Pick<NoteRow, "id" | "updated_at">>();
-  return json({ notes: result.results ?? [] });
+  return json({ notes: result.results ?? [], revision });
 }
 
 async function sidebarCounts(env: Env): Promise<Response> {
@@ -561,8 +576,19 @@ async function deleteLabels(request: Request, env: Env): Promise<Response> {
     seen.add(key);
   }
   const placeholders = keys.map(() => "?").join(",");
-  const result = await env.DB.prepare(`DELETE FROM labels WHERE name_key IN (${placeholders}) RETURNING name_key`).bind(...keys).all<{ name_key: string }>();
-  return json({ deleted: result.results.length });
+  const results = await env.DB.batch([
+    touchLabeledNotes(keys, env),
+    env.DB.prepare(`DELETE FROM labels WHERE name_key IN (${placeholders}) RETURNING name_key`).bind(...keys),
+  ]);
+  return json({ deleted: results[1].results.length });
+}
+
+function touchLabeledNotes(keys: string[], env: Env): D1PreparedStatement {
+  const now = new Date().toISOString();
+  return env.DB.prepare(`UPDATE notes SET updated_at = CASE WHEN updated_at >= ?
+    THEN strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+0.001 seconds') ELSE ? END
+    WHERE id IN (SELECT note_id FROM note_labels WHERE label_key IN (${keys.map(() => "?").join(",")}))`)
+    .bind(now, now, ...keys);
 }
 
 async function renameLabel(request: Request, env: Env): Promise<Response> {
@@ -584,9 +610,11 @@ async function renameLabel(request: Request, env: Env): Promise<Response> {
   const oldKey = labelKey(oldName);
   const newKey = labelKey(newName);
   if (oldKey === newKey) {
-    const result = await env.DB.prepare("UPDATE labels SET name = ? WHERE name_key = ?")
-      .bind(newName, oldKey).run();
-    if (result.meta.changes === 0) return json({ error: "ラベルが見つかりません。" }, 404);
+    const results = await env.DB.batch([
+      touchLabeledNotes([oldKey], env),
+      env.DB.prepare("UPDATE labels SET name = ? WHERE name_key = ?").bind(newName, oldKey),
+    ]);
+    if (results[1].meta.changes === 0) return json({ error: "ラベルが見つかりません。" }, 404);
     return json({ label: newName });
   }
 
@@ -600,6 +628,7 @@ async function renameLabel(request: Request, env: Env): Promise<Response> {
   let results: D1Result[];
   try {
     results = await env.DB.batch([
+      touchLabeledNotes([oldKey], env),
       // Keep the old-label existence check in the transaction. If another
       // request deletes it before this batch starts, no target row is made.
       env.DB.prepare(
@@ -617,7 +646,7 @@ async function renameLabel(request: Request, env: Env): Promise<Response> {
     }
     throw error;
   }
-  if ((results[0]?.meta.changes ?? 0) === 0) {
+  if ((results[1]?.meta.changes ?? 0) === 0) {
     return json({ error: "ラベルが見つかりません。" }, 404);
   }
   return json({ label: newName });
@@ -625,9 +654,13 @@ async function renameLabel(request: Request, env: Env): Promise<Response> {
 
 async function exportCounts(env: Env): Promise<Response> {
   const counts = await env.DB.prepare(
-    "SELECT (SELECT COUNT(*) FROM notes) AS notes, (SELECT COUNT(*) FROM attachments) AS attachments, (SELECT MAX(id) FROM notes) AS max_id",
-  ).first<{ notes: number; attachments: number; max_id: string | null }>();
-  return json({ notes: counts?.notes ?? 0, attachments: counts?.attachments ?? 0, max_id: counts?.max_id ?? null });
+    `SELECT (SELECT COUNT(*) FROM notes) AS notes, (SELECT COUNT(*) FROM attachments) AS attachments,
+    (SELECT MAX(id) FROM notes) AS max_id, (SELECT revision FROM data_revision WHERE id = 1) AS revision,
+    (SELECT COUNT(*) FROM note_deletions) AS deleting`,
+  ).first<{ notes: number; attachments: number; max_id: string | null; revision: number; deleting: number }>();
+  if (!counts) throw new Error("missing_export_counts");
+  if (counts.deleting) return json({ error: "ゴミ箱の完全削除が処理中です。完了後にバックアップをやり直してください。" }, 409);
+  return json(counts);
 }
 
 async function exportNotes(request: Request, env: Env): Promise<Response> {
@@ -779,24 +812,46 @@ async function moveToTrash(id: string, request: Request, env: Env): Promise<Resp
 
 async function restoreNote(id: string, env: Env): Promise<Response> {
   const result = await env.DB.prepare(
-    "UPDATE notes SET deleted_at = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NOT NULL",
+    `UPDATE notes SET deleted_at = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NOT NULL
+    AND NOT EXISTS (SELECT 1 FROM note_deletions WHERE note_id = notes.id)`,
   ).bind(new Date().toISOString(), id).run();
-  if (!result.meta.changes) return json({ error: "メモが見つかりません。" }, 404);
+  if (!result.meta.changes) {
+    if (await env.DB.prepare("SELECT note_id FROM note_deletions WHERE note_id = ?").bind(id).first()) {
+      return json({ error: "このメモは完全削除の処理中のため復元できません。" }, 409);
+    }
+    return json({ error: "メモが見つかりません。" }, 404);
+  }
   return json({ ok: true });
 }
 
 async function deleteTrashedNote(id: string, env: Env, cutoff?: string): Promise<boolean> {
+  return (await deleteTrashedNotes([id], env, cutoff)) > 0;
+}
+
+async function deleteTrashedNotes(ids: string[], env: Env, cutoff?: string): Promise<number> {
   const condition = cutoff ? " AND deleted_at <= ?" : "";
-  const bindings = cutoff ? [id, cutoff] : [id];
-  const note = await env.DB.prepare(`SELECT id FROM notes WHERE id = ? AND deleted_at IS NOT NULL${condition}`).bind(...bindings).first();
-  if (!note) return false;
-  const attachmentsResult = await env.DB.prepare("SELECT r2_key FROM attachments WHERE note_id = ?").bind(id).all<{ r2_key: string }>();
-  const keys = (attachmentsResult.results ?? []).map((row) => row.r2_key);
+  const idsJson = JSON.stringify(ids);
+  const bindings = cutoff ? [idsJson, cutoff] : [idsJson];
+  // Claim and snapshot keys in one SQL statement. Restore either wins before
+  // this claim (nothing is deleted), or loses afterwards (409, never lost images).
+  await env.DB.prepare(`INSERT OR IGNORE INTO note_deletions (note_id, r2_keys)
+    SELECT id, (SELECT json_group_array(r2_key) FROM attachments WHERE note_id = notes.id)
+    FROM notes WHERE id IN (SELECT value FROM json_each(?)) AND deleted_at IS NOT NULL${condition}`).bind(...bindings).run();
+  const jobs = await env.DB.prepare("SELECT r2_keys FROM note_deletions WHERE note_id IN (SELECT value FROM json_each(?))")
+    .bind(idsJson).all<{ r2_keys: string }>();
+  if (!jobs.results.length) return 0;
+  const keys: string[] = jobs.results.flatMap((job) => JSON.parse(job.r2_keys) as string[]);
   for (let index = 0; index < keys.length; index += 1000) {
     await env.IMAGES.delete(keys.slice(index, index + 1000));
   }
-  const result = await env.DB.prepare(`DELETE FROM notes WHERE id = ? AND deleted_at IS NOT NULL${condition}`).bind(...bindings).run();
-  return result.meta.changes > 0;
+  const results = await env.DB.batch([
+    env.DB.prepare(`DELETE FROM notes WHERE id IN (SELECT value FROM json_each(?)) AND deleted_at IS NOT NULL
+      AND EXISTS (SELECT 1 FROM note_deletions WHERE note_id = notes.id) RETURNING id`).bind(idsJson),
+    env.DB.prepare(`DELETE FROM note_deletions WHERE note_id IN (SELECT value FROM json_each(?))
+      AND NOT EXISTS (SELECT 1 FROM notes WHERE id = note_deletions.note_id)`).bind(idsJson),
+  ]);
+  // meta.changes includes cascades/triggers; count only the deleted notes.
+  return results[0].results.length;
 }
 
 async function permanentlyDeleteNote(id: string, env: Env): Promise<Response> {
@@ -812,31 +867,18 @@ async function emptyTrash(env: Env): Promise<Response> {
   let failed = 0;
   while (true) {
     const result = await env.DB.prepare(
-      "SELECT id FROM notes WHERE deleted_at IS NOT NULL AND deleted_at <= ? AND id > ? ORDER BY id LIMIT 99",
+      "SELECT id FROM notes WHERE deleted_at IS NOT NULL AND deleted_at <= ? AND id > ? ORDER BY id LIMIT 200",
     ).bind(cutoff, afterId).all<{ id: string }>();
     const rows = result.results ?? [];
     if (!rows.length) break;
-    const ids = rows.map((row) => row.id);
-    afterId = ids[ids.length - 1];
-    const placeholders = ids.map(() => "?").join(",");
+    afterId = rows[rows.length - 1].id;
     try {
-      const attachments = await env.DB.prepare(
-        `SELECT r2_key FROM attachments WHERE note_id IN (${placeholders})`,
-      ).bind(...ids).all<{ r2_key: string }>();
-      const keys = (attachments.results ?? []).map((row) => row.r2_key);
-      for (let index = 0; index < keys.length; index += 1000) {
-        await env.IMAGES.delete(keys.slice(index, index + 1000));
-      }
-      // R2の削除が成功したバッチだけ、関連データとともに完全削除する。
-      const removed = await env.DB.prepare(
-        `DELETE FROM notes WHERE id IN (${placeholders}) AND deleted_at IS NOT NULL AND deleted_at <= ? RETURNING id`,
-      ).bind(...ids, cutoff).all<{ id: string }>();
-      deleted += (removed.results ?? []).length;
+      deleted += await deleteTrashedNotes(rows.map((row) => row.id), env, cutoff);
     } catch (error) {
       failed += rows.length;
       console.error("trash_empty_batch_failed", error);
     }
-    if (rows.length < 99) break;
+    if (rows.length < 200) break;
   }
   return json({ deleted, failed });
 }
@@ -846,18 +888,19 @@ async function purgeOldTrash(env: Env): Promise<void> {
   let afterId = "";
   while (true) {
     const result = await env.DB.prepare(
-      "SELECT id FROM notes WHERE deleted_at IS NOT NULL AND deleted_at <= ? AND id > ? ORDER BY id LIMIT 50",
+      `SELECT id FROM notes WHERE deleted_at IS NOT NULL
+      AND (deleted_at <= ? OR EXISTS (SELECT 1 FROM note_deletions WHERE note_id = notes.id))
+      AND id > ? ORDER BY id LIMIT 200`,
     ).bind(cutoff, afterId).all<{ id: string }>();
     const rows = result.results ?? [];
-    for (const row of rows) {
-      afterId = row.id;
-      try {
-        await deleteTrashedNote(row.id, env, cutoff);
-      } catch (error) {
-        console.error("trash_purge_note_failed", row.id, error);
-      }
+    if (!rows.length) break;
+    afterId = rows[rows.length - 1].id;
+    try {
+      await deleteTrashedNotes(rows.map((row) => row.id), env, cutoff);
+    } catch (error) {
+      console.error("trash_purge_batch_failed", error);
     }
-    if (rows.length < 50) break;
+    if (rows.length < 200) break;
   }
 }
 
@@ -1313,6 +1356,9 @@ export default {
       }
       return json({ error: "見つかりません。" }, 404);
     } catch (error) {
+      if (error instanceof Error && error.message.includes("note_deletion_in_progress")) {
+        return json({ error: "このメモは完全削除の処理中です。" }, 409);
+      }
       if (error instanceof Error && ["empty_body", "body_too_large", "invalid_json"].includes(error.message)) {
         return json({ error: "送信内容を確認してください。" }, error.message === "body_too_large" ? 413 : 400);
       }

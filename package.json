@@ -4,6 +4,8 @@
   "version": "0.2.0",
   "type": "module",
   "scripts": {
+    "test": "node --test tests/regression.test.mjs",
+    "test:browser": "node --test tests/browser.test.mjs",
     "build": "wrangler types && tsc --noEmit && vite build",
     "dev": "npm run build && wrangler dev",
     "db:local": "wrangler d1 migrations apply mykeep --local",

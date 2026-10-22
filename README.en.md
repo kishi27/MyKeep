@@ -66,6 +66,8 @@ npm run dev
 
 Open the local URL shown in the terminal. ``npm run dev`` builds the app and serves the web UI and API on the same port through Wrangler. D1 and R2 run locally. Restart the process after changing code.
 
+Run `npm test` for regression checks using isolated local D1/R2: deletion/restore races, stale label edits, date sorting, Capture, ZIP extraction and additional restore. No production data is used. After `npm run build`, run `npm run test:browser` with Playwright and Chrome available to check PIN, unsaved state and UI interactions (set `PLAYWRIGHT_MODULE` to the Playwright module path if needed). Phone tests emulate devices in a browser and do not replace physical Safari/PWA testing.
+
 To try the Chrome extension locally, set ``CAPTURE_API_KEY=<your-generated-key>`` in the Git-ignored ``.dev.vars`` file. Set the extension’s API URL to the local URL followed by ``/api/capture``, for example ``http://127.0.0.1:8787/api/capture``.
 
 ## Fork this repository on GitHub
@@ -136,6 +138,7 @@ The flow is: bring in changes from the official repository → review the change
 
 - **Create**: Select “+ New note” in the header, enter a title, note text, URL, or other details, and save. The note editor starts with three lines of text and can be resized vertically.
 - **Edit**: Open a card to edit it. Color, pin, and archive controls appear side by side. Long text is shortened in the list, but the saved data is not truncated. The display limits are three lines for note titles, two for note text, two for link titles, and three for link descriptions.
+- **Dates and sorting**: Cards show their creation date; the editor shows both creation and update timestamps. Choose newest or oldest first for either date using the list's Sort selector. The default is updated, newest first. Pinned sections stay separate and sort within each section. Editing does not change a note's creation date or its date-based position when sorting by creation. The choice is saved in this browser.
 - **Images**: In the new-note or edit screen, add images with the file picker, Ctrl+V, or drag and drop. Remove pending images from their previews. For a new note, images upload one at a time after the note is saved.
 - **View images**: Click or tap a saved image in the editor to open it larger. Saved link thumbnails appear after attachment images and can also be enlarged. Select “Open original” to use the browser’s standard image-saving options. Switch between multiple images with the previous and next buttons; the viewer shows the current position. On a PC, use the left and right arrow keys to move and Escape to close. On phones, swipe to move between images.
 - **Pin and archive**: Use the buttons at the bottom of a card. After unpinning a note, select “Undo” within five seconds to restore the pin. Open archived notes from “Archive” in the sidebar.
@@ -280,7 +283,9 @@ Markdown files store note text, URL, dates, state, checklist, labels, and attach
 
 If an attachment cannot be fetched, Export continues when possible and sets that attachment’s ``zip_path`` to ``null``. At the end, it shows the number of notes and successful and failed attachments. Browsers with direct file access write items to the selected file in sequence. Other browsers download the completed ZIP as an in-memory Blob. Large backups require enough free memory on the device.
 
-Do not change data from another tab or device while Export is running. Unused labels and empty groups are included. Re-importing this ZIP into Google Keep is not guaranteed.
+Do not change data from another tab or device while Export is running. Changes to content, labels, or attachments during retrieval abort the backup and ask you to retry, even if counts stay the same. Export also waits until pending permanent deletion finishes. Unused labels and empty groups are included. Re-importing this ZIP into Google Keep is not guaranteed.
+
+Permanent deletion records the note and attachment keys in D1 before deleting R2 objects, then removes the note after success. Restore is rejected once deletion starts. Interrupted deletion remains recorded and is retried by another delete operation or the next daily cleanup. Label rename/deletion also updates affected notes' timestamps, so an older editor on another device cannot silently restore outdated labels. Automatic refresh checks the first 50 notes plus one revision number to detect attachment, label, and later-page changes.
 
 ### Restore from a MyKeep backup
 

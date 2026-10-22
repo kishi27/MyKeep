@@ -18,8 +18,10 @@ import { NOTE_COLORS } from "./types";
 import type { Attachment, ChecklistInput, Note, NoteColor, NoteInput } from "./types";
 
 type View = "active" | "pinned" | "unpinned" | "unlabeled" | "imageless" | "archived" | "trash";
-type NoteList = { notes: Note[]; hasMore: boolean };
-type NoteCheck = { notes: Pick<Note, "id" | "updated_at">[] };
+type NoteSort = "updated_desc" | "updated_asc" | "created_desc" | "created_asc";
+type NoteDates = Pick<Note, "created_at" | "updated_at">;
+type NoteList = { notes: Note[]; hasMore: boolean; revision: number };
+type NoteCheck = { notes: Pick<Note, "id" | "updated_at">[]; revision: number };
 type SidebarCounts = { views: Record<View, number>; labels: Record<string, number> };
 type ImportCounts = { done: number; total: number; success: number; failed: number; skipped: number };
 type ImportProgress = { notes: ImportCounts & { trashed: number }; attachments: ImportCounts };
@@ -83,6 +85,8 @@ const CARD_BODY_SETTING = "mykeep.cardShowBody";
 const REFRESH_SETTING = "mykeep.autoRefreshSeconds";
 const REFRESH_SECONDS = [10, 30, 60] as const;
 type RefreshSeconds = typeof REFRESH_SECONDS[number];
+const SORT_SETTING = "mykeep.sortOrder";
+const NOTE_SORTS = ["updated_desc", "updated_asc", "created_desc", "created_asc"] as const satisfies readonly NoteSort[];
 
 function layoutNoteGrids(root: HTMLElement) {
   for (const grid of root.querySelectorAll<HTMLElement>(".grid")) {
@@ -212,21 +216,35 @@ function savedRefreshSeconds(): RefreshSeconds {
   }
 }
 
+function savedSortOrder(): NoteSort {
+  try {
+    const value = window.localStorage.getItem(SORT_SETTING);
+    return NOTE_SORTS.find((sort) => sort === value) ?? "updated_desc";
+  } catch {
+    return "updated_desc";
+  }
+}
+
+function formatTimestamp(value: string, formatter: Intl.DateTimeFormat): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : formatter.format(date);
+}
+
 function firstPageChanged(current: Note[], next: NoteCheck): boolean {
   const first = current.slice(0, 50);
   return first.length !== next.notes.length
     || first.some((note, index) => note.id !== next.notes[index].id || note.updated_at !== next.notes[index].updated_at);
 }
 
-function listParams(view: View, search: string, label: string): URLSearchParams {
-  const params = new URLSearchParams({ view });
+function listParams(view: View, search: string, label: string, sort: NoteSort): URLSearchParams {
+  const params = new URLSearchParams({ view, sort });
   if (search.trim()) params.set("q", search.trim());
   if (label) params.set("label", label);
   return params;
 }
 
-function listPath(view: View, search: string, label: string, offset: number): string {
-  const params = listParams(view, search, label);
+function listPath(view: View, search: string, label: string, offset: number, sort: NoteSort): string {
+  const params = listParams(view, search, label, sort);
   params.set("offset", String(offset));
   return `/api/notes?${params}`;
 }
@@ -319,7 +337,10 @@ export default function App() {
 function MyKeep() {
   const { language, setLanguage, locale, t, uiMessage } = useI18n();
   const countFormat = new Intl.NumberFormat(locale);
+  const cardDateFormat = new Intl.DateTimeFormat(locale, { dateStyle: "short" });
+  const editorDateFormat = new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" });
   const [view, setView] = useState<View>("active");
+  const [sortOrder, setSortOrder] = useState<NoteSort>(savedSortOrder);
   const [search, setSearch] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [searchComposing, setSearchComposing] = useState(false);
@@ -360,6 +381,7 @@ function MyKeep() {
   const [error, setError] = useState("");
   const [reload, setReload] = useState(0);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editorDates, setEditorDates] = useState<NoteDates | null>(null);
   const [draft, setDraft] = useState<NoteDraft | null>(null);
   const editorBaselineRef = useRef("");
   const editorVersionRef = useRef<string | null>(null);
@@ -424,6 +446,7 @@ function MyKeep() {
   const labelMenuRef = useRef<HTMLDivElement>(null);
   const pendingImagesRef = useRef<PendingImage[]>([]);
   const notesRef = useRef(notes);
+  const revisionRef = useRef<number | null>(null);
   const lastListPathRef = useRef("");
   const selectionListPathRef = useRef("");
   const refreshingRef = useRef(false);
@@ -513,14 +536,14 @@ function MyKeep() {
     return () => { observer.disconnect(); cancelAnimationFrame(frame); };
   }, [notes, view, selecting, cardShowTitle, cardShowBody]);
   useEffect(() => {
-    const path = listPath(view, search, labelFilter, 0);
+    const path = listPath(view, search, labelFilter, 0, sortOrder);
     if (path === selectionListPathRef.current) return;
     selectionListPathRef.current = path;
     setSelectedNoteIds(new Set());
     setSelecting(false);
     setBulkLabelsOpen(false);
     preservedLabelFilterRef.current = "";
-  }, [view, search, labelFilter]);
+  }, [view, search, labelFilter, sortOrder]);
   useEffect(() => {
     const loaded = new Set(notes.map((note) => note.id));
     setSelectedNoteIds((current) => {
@@ -543,12 +566,13 @@ function MyKeep() {
       window.localStorage.setItem(CARD_TITLE_SETTING, String(cardShowTitle));
       window.localStorage.setItem(CARD_BODY_SETTING, String(cardShowBody));
       window.localStorage.setItem(REFRESH_SETTING, String(autoRefreshSeconds));
+      window.localStorage.setItem(SORT_SETTING, sortOrder);
     } catch { /* 保存できない環境でも画面内の設定は使える。 */ }
-  }, [darkMode, richLinkPreview, cardShowTitle, cardShowBody, autoRefreshSeconds]);
+  }, [darkMode, richLinkPreview, cardShowTitle, cardShowBody, autoRefreshSeconds, sortOrder]);
 
   useEffect(() => {
     const controller = new AbortController();
-    const path = listPath(view, search, labelFilter, 0);
+    const path = listPath(view, search, labelFilter, 0, sortOrder);
     const changedFilter = path !== lastListPathRef.current;
     lastListPathRef.current = path;
     const generation = ++listGenerationRef.current;
@@ -564,6 +588,7 @@ function MyKeep() {
     if (changedFilter) {
       window.scrollTo({ top: 0, behavior: "instant" });
       scrollAnchorRef.current = null;
+      revisionRef.current = null;
       pagesLoadedRef.current = 1;
       notesRef.current = [];
       hasMoreRef.current = false;
@@ -577,8 +602,10 @@ function MyKeep() {
         const collected: Note[] = [];
         let more = false;
         let fetchedPages = 0;
+        let revision: number | null = null;
         for (let page = 0; page < pages; page++) {
-          const data = await api<NoteList>(listPath(view, search, labelFilter, page * 50), { signal: controller.signal });
+          const data = await api<NoteList>(listPath(view, search, labelFilter, page * 50, sortOrder), { signal: controller.signal });
+          if (page === 0) revision = data.revision;
           collected.push(...data.notes);
           fetchedPages++;
           more = data.hasMore && data.notes.length > 0;
@@ -593,6 +620,7 @@ function MyKeep() {
             scrollAnchorRef.current = null;
           }
           notesRef.current = collected;
+          if (revision !== null) revisionRef.current = revision;
           pagesLoadedRef.current = fetchedPages;
           hasMoreRef.current = more;
           setNotes(collected);
@@ -613,7 +641,7 @@ function MyKeep() {
     }
     void refresh();
     return () => controller.abort();
-  }, [view, search, labelFilter, reload]);
+  }, [view, search, labelFilter, sortOrder, reload]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -647,9 +675,10 @@ function MyKeep() {
       const controller = new AbortController();
       checkControllerRef.current = controller;
       try {
-        const data = await api<NoteCheck>(`/api/notes/check?${listParams(view, search, labelFilter)}`, { signal: controller.signal });
+        const data = await api<NoteCheck>(`/api/notes/check?${listParams(view, search, labelFilter, sortOrder)}`, { signal: controller.signal });
+        const revisionChanged = revisionRef.current !== null && data.revision !== revisionRef.current;
         if (active && !controller.signal.aborted && !refreshingRef.current && !loadingMoreRef.current
-          && !bulkWorkingRef.current && firstPageChanged(notesRef.current, data)) reloadList();
+          && !bulkWorkingRef.current && (revisionChanged || firstPageChanged(notesRef.current, data))) reloadList();
       } catch { /* 自動確認の失敗は表示中の一覧に影響させない。 */ }
       finally {
         checking = false;
@@ -668,7 +697,7 @@ function MyKeep() {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [view, search, labelFilter, autoRefreshSeconds]);
+  }, [view, search, labelFilter, sortOrder, autoRefreshSeconds]);
 
   useEffect(() => {
     const sentinel = sentinelRef.current;
@@ -678,7 +707,7 @@ function MyKeep() {
     }, { rootMargin: "0px 0px 240px 0px" });
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [notes, hasMore, loading, loadingMore, reload, view, search, labelFilter]);
+  }, [notes, hasMore, loading, loadingMore, reload, view, search, labelFilter, sortOrder]);
 
   useEffect(() => () => { moreControllerRef.current?.abort(); }, []);
 
@@ -831,6 +860,7 @@ function MyKeep() {
   function closeEditor() {
     setViewerImageId(null);
     setEditorPreviewImage("");
+    setEditorDates(null);
     clearPendingImages();
     setDraft(null);
     setLabelMenuOpen(false);
@@ -850,6 +880,7 @@ function MyKeep() {
     setError("");
     clearPendingImages();
     setEditingId(note?.id ?? null);
+    setEditorDates(note ? { created_at: note.created_at, updated_at: note.updated_at } : null);
     setEditorAttachments(note?.attachments ?? []);
     setEditorPreviewImage(note?.preview_image ?? "");
     setSelectedLabels(note?.labels ?? []);
@@ -1130,7 +1161,7 @@ function MyKeep() {
     setLoadingMore(true);
     setMoreError("");
     try {
-      const data = await api<NoteList>(listPath(view, search, labelFilter, offset), { signal: controller.signal });
+      const data = await api<NoteList>(listPath(view, search, labelFilter, offset, sortOrder), { signal: controller.signal });
       if (controller.signal.aborted || generation !== listGenerationRef.current) return;
       const ids = new Set(notesRef.current.map((note) => note.id));
       const added = data.notes.filter((note) => !ids.has(note.id));
@@ -1170,6 +1201,7 @@ function MyKeep() {
       setDraft((current) => current ? { ...current, card_image: note.card_image } : current);
       setEditorPreviewImage(note.preview_image);
       editorVersionRef.current = note.updated_at;
+      setEditorDates({ created_at: note.created_at, updated_at: note.updated_at });
       editorBaselineRef.current = JSON.stringify({ draft: { ...draft, title, card_image: note.card_image }, labels: selectedLabels });
       if (!editingId) {
         setEditingId(note.id);
@@ -1515,7 +1547,10 @@ function MyKeep() {
     setError("");
     try {
       const deleted = await api<{ previous_updated_at: string; updated_at: string }>(`/api/notes/${editingId}/attachments/${attachment.id}`, { method: "DELETE" });
-      if (deleted.updated_at && editorVersionRef.current === deleted.previous_updated_at) editorVersionRef.current = deleted.updated_at;
+      if (deleted.updated_at && editorVersionRef.current === deleted.previous_updated_at) {
+        editorVersionRef.current = deleted.updated_at;
+        setEditorDates((current) => current ? { ...current, updated_at: deleted.updated_at } : current);
+      }
       setEditorAttachments((current) => current.filter((item) => item.id !== attachment.id));
       setDraft((current) => current?.card_image === `attachment:${attachment.id}` ? { ...current, card_image: "auto" } : current);
       setNotes((current) => current.map((note) => note.id === editingId
@@ -1659,6 +1694,7 @@ function MyKeep() {
     const cardImage = resolveCardImage(note, visiblePreview);
     const contentImage = cardImage?.kind === "preview" && note.url && visiblePreview ? null : cardImage;
     const remainingDays = view === "trash" ? trashRemainingDays(note.deleted_at) : null;
+    const createdDate = formatTimestamp(note.created_at, cardDateFormat);
     const selected = selectedNoteIds.has(note.id);
     return (
       <article className={`card${selected ? " selected-card" : ""}`} data-color={note.color} data-note-id={note.id} key={note.id}
@@ -1688,6 +1724,7 @@ function MyKeep() {
         {remainingDays !== null && <p className="trash-countdown">
           {remainingDays > 0 ? t("完全削除まで あと{0}日", { 0: countFormat.format(remainingDays) }) : t("まもなく完全削除")}
         </p>}
+        {createdDate && <p className="card-created"><span>{t("作成")}</span><time dateTime={note.created_at}>{createdDate}</time></p>}
         {!selecting && <div className="card-actions">
           {view === "trash" ? <>
             <button disabled={working} onClick={() => restore(note)}>{t("復元")}</button>
@@ -1763,6 +1800,15 @@ function MyKeep() {
         </aside>
         <div className="main-content" ref={mainContentRef}>
       {(pullDistance > 0 || pullRefreshing) && <div className="pull-indicator" role="status" style={{ height: pullRefreshing ? 38 : Math.min(pullDistance, 80) }}>↻ {pullRefreshing ? t("更新中…") : pullDistance >= 70 ? t("離して更新") : t("引っ張って更新")}</div>}
+      <div className="list-toolbar">
+        <label htmlFor="note-sort">{t("並び順")}</label>
+        <select id="note-sort" aria-label={t("並び順")} value={sortOrder} onChange={(event) => setSortOrder(event.target.value as NoteSort)}>
+          <option value="updated_desc">{t("更新日時（新しい順）")}</option>
+          <option value="updated_asc">{t("更新日時（古い順）")}</option>
+          <option value="created_desc">{t("作成日時（新しい順）")}</option>
+          <option value="created_asc">{t("作成日時（古い順）")}</option>
+        </select>
+      </div>
       {view === "trash" && <div className="trash-header">
         <p>{t("ゴミ箱内のメモは7日後に削除されます。")}</p>
         <button type="button" className="danger" disabled={working || importing || exporting || !counts?.views.trash} onClick={() => void clearTrash()}>{t("ゴミ箱を空にする")}</button>
@@ -2007,6 +2053,10 @@ function MyKeep() {
               <h2>{editingId ? t("メモを編集") : t("新規メモ")}</h2>
               <button type="button" className="close" onClick={requestCloseEditor} disabled={working} aria-label={t("閉じる")}>×</button>
             </div>
+            {editorDates && <div className="editor-dates">
+              <div><span>{t("作成日時")}</span><time dateTime={editorDates.created_at}>{formatTimestamp(editorDates.created_at, editorDateFormat)}</time></div>
+              <div><span>{t("更新日時")}</span><time dateTime={editorDates.updated_at}>{formatTimestamp(editorDates.updated_at, editorDateFormat)}</time></div>
+            </div>}
             {error && <p className="error" role="alert">{uiMessage(error)}</p>}
             <label>{t("タイトル")}<input value={draft.title} maxLength={300} onChange={(event) => setDraft({ ...draft, title: event.target.value })} /></label>
             <label>{t("本文")}<textarea value={draft.body} maxLength={100000} rows={3} onChange={(event) => setDraft({ ...draft, body: event.target.value })} /></label>
