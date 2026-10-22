@@ -9,6 +9,7 @@ export function savedLanguage(): Language {
 
 // Japanese keys also serve as the original text for messages kept in component state.
 const english = {
+  "バージョン": "Version", "ビルド": "Build",
   "保存していない変更があります。保存せずに閉じますか？": "You have unsaved changes. Close without saving?",
   "別の画面でこのメモが更新されています。入力内容を控えてから、メモを開き直してください。": "This note was updated in another window or device. Copy your unsaved changes, then reopen the note.",
   "更新日時を確認してください。": "Please check the update timestamp.",

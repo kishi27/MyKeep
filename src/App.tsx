@@ -1844,6 +1844,11 @@ function MyKeep() {
               {REFRESH_SECONDS.map((seconds) => <option key={seconds} value={seconds}>{t("{0}秒", { 0: countFormat.format(seconds) })}</option>)}
             </select>
           </label>
+          <div className="app-version">
+            <strong>MyKeep</strong>
+            <span>{t("バージョン")} {import.meta.env.VITE_APP_VERSION}</span>
+            <span>{t("ビルド")} <code>{import.meta.env.VITE_BUILD_ID}</code></span>
+          </div>
         </section>
       </div>}
 

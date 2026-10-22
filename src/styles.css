@@ -56,6 +56,7 @@ h1 { margin: 0; font-size: 1.35rem; font-weight: 700; }
 .icon-button:hover { background: #ecece6; }
 .icon-button.active { background: #fff2c5; color: #282216; }
 .settings-menu-wrap { position: relative; }
+.app-version { display: grid; gap: 4px; margin-top: 20px; padding-top: 12px; border-top: 1px solid #8886; font-size: .85rem; }
 .settings-dropdown { position: absolute; right: 0; top: calc(100% + 6px); z-index: 9; width: 170px; padding: 6px; border: 1px solid #dddcd5; border-radius: 10px; background: white; box-shadow: 0 8px 24px #0002; }
 .settings-dropdown button { display: block; width: 100%; padding: 10px 12px; border: 0; border-radius: 7px; background: transparent; color: inherit; text-align: left; }
 .settings-dropdown button:hover:not(:disabled) { background: #f1f1ed; }
