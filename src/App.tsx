@@ -8,6 +8,8 @@ import type { KeepZipResult } from "./keepImport";
 import { BackupRestorePanel } from "./BackupRestorePanel";
 import { PinGate, PinSettings } from "./MobilePinLock";
 import { pinSnapshot } from "./pinLock";
+import { api } from "./api";
+import { UnsavedChangesProvider, useUnsavedChanges } from "./UnsavedChanges";
 import { canRetryLinkPreview, displayLinkTitle, getLinkPreview, mergeLinkPreview } from "./linkPreview";
 import type { LinkPreview } from "./linkPreview";
 import { LANGUAGE_SETTING, LanguageContext, savedLanguage, useI18n, formatMessage } from "./i18n";
@@ -269,23 +271,6 @@ function notePreview(note: Note, showTitle: boolean, showBody: boolean, showArch
   </>;
 }
 
-async function api<T>(path: string, options?: RequestInit): Promise<T> {
-  const headers = new Headers(options?.headers);
-  if (options?.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  const response = await fetch(path, {
-    ...options,
-    headers,
-  });
-  let data: T & { error?: string };
-  try {
-    data = (await response.json()) as T & { error?: string };
-  } catch {
-    throw new Error("応答を読み取れませんでした。ページを再読み込みしてください。");
-  }
-  if (!response.ok) throw new Error(data.error ?? "処理に失敗しました。");
-  return data;
-}
-
 function LabelCreator({ disabled, onCreate }: { disabled: boolean; onCreate: (name: string) => Promise<CreatedLabel> }) {
   const { t, uiMessage } = useI18n();
   const [open, setOpen] = useState(false);
@@ -328,7 +313,7 @@ export default function App() {
     document.documentElement.lang = language;
     try { localStorage.setItem(LANGUAGE_SETTING, language); } catch { /* In-memory settings still work. */ }
   }, [language]);
-  return <LanguageContext.Provider value={{ language, setLanguage }}><PinGate><MyKeep /></PinGate></LanguageContext.Provider>;
+  return <LanguageContext.Provider value={{ language, setLanguage }}><UnsavedChangesProvider><PinGate><MyKeep /></PinGate></UnsavedChangesProvider></LanguageContext.Provider>;
 }
 
 function MyKeep() {
@@ -357,6 +342,7 @@ function MyKeep() {
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState("");
   const [pullDistance, setPullDistance] = useState(0);
   const [pullRefreshing, setPullRefreshing] = useState(false);
   const [working, setWorking] = useState(false);
@@ -455,16 +441,8 @@ function MyKeep() {
   const scrollAnchorRef = useRef<ScrollAnchor | null>(null);
   const deepLinkNoteRef = useRef(new URL(window.location.href).searchParams.get("note"));
 
-  useEffect(() => {
-    if (!draft) return;
-    const onBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (JSON.stringify({ draft, labels: selectedLabels }) === editorBaselineRef.current && pendingImagesRef.current.length === 0) return;
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", onBeforeUnload);
-    return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [draft, selectedLabels]);
+  useUnsavedChanges(Boolean(draft && (JSON.stringify({ draft, labels: selectedLabels }) !== editorBaselineRef.current
+    || pendingImages.length > 0)));
 
   useEffect(() => {
     if (!undoAction || undoing) return;
@@ -580,6 +558,7 @@ function MyKeep() {
     loadingMoreRef.current = false;
     setLoadingMore(false);
     pageLoadFailedRef.current = false;
+    setMoreError("");
     const pages = changedFilter ? 1 : pagesLoadedRef.current;
     refreshingRef.current = true;
     if (changedFilter) {
@@ -1149,7 +1128,7 @@ function MyKeep() {
     loadingMoreRef.current = true;
     moreControllerRef.current = controller;
     setLoadingMore(true);
-    setError("");
+    setMoreError("");
     try {
       const data = await api<NoteList>(listPath(view, search, labelFilter, offset), { signal: controller.signal });
       if (controller.signal.aborted || generation !== listGenerationRef.current) return;
@@ -1163,7 +1142,7 @@ function MyKeep() {
     } catch (cause) {
       if (!controller.signal.aborted && generation === listGenerationRef.current) {
         pageLoadFailedRef.current = true;
-        setError(`${cause instanceof Error ? cause.message : "読み込みに失敗しました。"} 更新ボタンで再試行してください。`);
+        setMoreError(cause instanceof Error ? cause.message : "読み込みに失敗しました。");
       }
     } finally {
       if (moreControllerRef.current === controller) {
@@ -1801,6 +1780,13 @@ function MyKeep() {
       </>}
 
       {(loading || loadingMore) && <p className="status">{t("読み込み中…")}</p>}
+      {moreError && <div className="status">
+        <p className="error" role="alert">{uiMessage(moreError)}</p>
+        <button type="button" className="primary" disabled={loading || loadingMore} onClick={() => {
+          pageLoadFailedRef.current = false;
+          void loadMore();
+        }}>{t("続きを再試行")}</button>
+      </div>}
       <div className="list-sentinel" ref={sentinelRef} aria-hidden="true" />
         </div>
       </div>

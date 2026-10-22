@@ -9,6 +9,12 @@ export function savedLanguage(): Language {
 
 // Japanese keys also serve as the original text for messages kept in component state.
 const english = {
+  "続きを再試行": "Retry loading more",
+  "ログインの確認が必要です。入力内容を残したまま、別タブでMyKeepを開いてログインを確認してください。": "Please check your login. Keep your edits here and open MyKeep in another tab to sign in.",
+  "通信できませんでした。接続を確認して再試行してください。ログイン切れの可能性もあるため、続く場合は別タブでMyKeepを開いて確認してください。": "Could not connect. Check your connection and retry. If this continues, open MyKeep in another tab to check whether your login has expired.",
+  "サーバーで処理できませんでした。入力内容はそのままで、時間を置いて再試行してください。": "The server could not process the request. Keep your edits and try again later.",
+  "応答の形式が正しくありません。入力内容を残したまま再試行してください。": "The response format was invalid. Keep your edits and retry.",
+  "アクセスが拒否されました。別タブでMyKeepを開き、ログイン状態とアクセス権を確認してください。": "Access was denied. Open MyKeep in another tab to check your login and permissions.",
   "バックアップ件数の応答が正しくありません。ページを再読み込みしてください。": "Invalid backup counts. Please reload the page.",
   "バックアップ中にデータ件数が変わりました。編集・追加・削除を止めて、もう一度実行してください。": "Data counts changed during backup. Stop editing, adding or deleting data, then try again.",
   "バージョン": "Version", "ビルド": "Build",
