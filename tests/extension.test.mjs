@@ -221,6 +221,9 @@ test("duplicate matches link to saved notes and require a cancellable, data-pres
     assert.equal(await page.evaluate(() => window.__myKeepMock.posts.length), 0);
 
     await page.locator("#save").click();
+    await page.locator("#title").press("Enter");
+    assert.equal(await page.locator("#duplicateConfirm").isVisible(), true);
+    assert.equal(await page.evaluate(() => window.__myKeepMock.posts.length), 0);
     await page.locator("#confirmAdd").click();
     await page.waitForFunction(() => window.__myKeepMock.posts.length === 1);
     const payload = await page.evaluate(() => window.__myKeepMock.posts[0]);
@@ -283,6 +286,84 @@ test("the 8-second timeout enables save and a late duplicate response cannot rep
     await page.locator("#save").click();
     assert.equal(await page.locator("#duplicateConfirm").isVisible(), true);
     assert.equal(await page.evaluate(() => window.__myKeepMock.posts.length), 1);
+  } finally {
+    await context.close();
+  }
+});
+
+test("saving without waiting cancels the duplicate lookup and ignores its late response after success", async () => {
+  const { context, page } = await openPopup({ notes: [], delayDuplicateCheck: true });
+  try {
+    await page.waitForFunction(() => window.__myKeepMock.duplicateTimeoutMs === 8000
+      && !document.querySelector("#labelToggle").disabled
+      && !document.querySelector("#saveWithoutWaiting").hidden);
+    await page.locator("#title").fill("Save while checking");
+    await page.locator("#body").fill("Keep these fields on the bypass path.");
+    await page.locator("#pinned").check();
+    await page.locator("#labelToggle").click();
+    await page.locator("#labelOptions input").check();
+    await page.locator("#imageFile").setInputFiles({ name: "bypass.png", mimeType: "image/png", buffer: Buffer.from("image bytes") });
+
+    await page.locator("#saveWithoutWaiting").click();
+    await page.waitForFunction(() => window.__myKeepMock.posts.length === 1
+      && document.querySelector("#status").textContent === "保存しました。");
+    const payload = await page.evaluate(() => window.__myKeepMock.posts[0]);
+    assert.equal(payload.title, "Save while checking");
+    assert.equal(payload.url, PAGE_URL);
+    assert.equal(payload.body, "Keep these fields on the bypass path.");
+    assert.equal(payload.pinned, "true");
+    assert.equal(payload.labels, JSON.stringify(["仕事"]));
+    assert.deepEqual(payload.image, { name: "bypass.png", type: "image/png", size: 11 });
+    assert.equal(await page.locator("#saveWithoutWaiting").isVisible(), false);
+
+    await page.evaluate(() => window.__myKeepMock.releaseDuplicateCheck([
+      { id: "late-result", title: "Late duplicate response", archived: false, deleted_at: null },
+    ]));
+    await page.evaluate(() => new Promise((resolveMicrotask) => setTimeout(resolveMicrotask, 0)));
+    assert.equal(await page.locator("#status").innerText(), "保存しました。");
+    assert.equal(await page.locator("#duplicateList a").count(), 1);
+    assert.equal(await page.locator("#duplicateList a").getAttribute("href"), "https://keep.example/?note=saved-1");
+    assert.equal(await page.locator("#duplicateList").innerText(), "Save while checking");
+  } finally {
+    await context.close();
+  }
+});
+
+test("a failed bypass save retains all capture fields and ignores a late duplicate response", async () => {
+  const { context, page } = await openPopup({ notes: [], delayDuplicateCheck: true, failSave: true });
+  try {
+    await page.waitForFunction(() => window.__myKeepMock.duplicateTimeoutMs === 8000
+      && !document.querySelector("#labelToggle").disabled
+      && !document.querySelector("#saveWithoutWaiting").hidden);
+    await page.locator("#title").fill("Keep title after failure");
+    await page.locator("#body").fill("Keep body after failure.");
+    await page.locator("#pinned").check();
+    await page.locator("#labelToggle").click();
+    await page.locator("#labelOptions input").check();
+    await page.locator("#imageFile").setInputFiles({ name: "failed-bypass.png", mimeType: "image/png", buffer: Buffer.from("image bytes") });
+
+    await page.locator("#saveWithoutWaiting").click();
+    await page.waitForFunction(() => window.__myKeepMock.posts.length === 1
+      && document.querySelector("#status").textContent.includes("保存できませんでした"));
+    assert.equal(await page.locator("#title").inputValue(), "Keep title after failure");
+    assert.equal(await page.locator("#body").inputValue(), "Keep body after failure.");
+    assert.equal(await page.locator("#pinned").isChecked(), true);
+    assert.equal(await page.locator("#labelOptions input").isChecked(), true);
+    assert.equal(await page.locator("#imagePreview").isVisible(), true);
+    assert.equal(await page.locator("#imageName").innerText(), "failed-bypass.png");
+
+    await page.evaluate(() => window.__myKeepMock.releaseDuplicateCheck([
+      { id: "late-result", title: "Late duplicate response", archived: false, deleted_at: null },
+    ]));
+    await page.evaluate(() => new Promise((resolveMicrotask) => setTimeout(resolveMicrotask, 0)));
+    assert.match(await page.locator("#status").innerText(), /保存できませんでした/);
+    assert.equal(await page.locator("#duplicateList a").count(), 0);
+    assert.match(await page.locator("#duplicateStatus").innerText(), /重複確認を中止しました/);
+    assert.equal(await page.locator("#title").inputValue(), "Keep title after failure");
+    assert.equal(await page.locator("#body").inputValue(), "Keep body after failure.");
+    assert.equal(await page.locator("#pinned").isChecked(), true);
+    assert.equal(await page.locator("#labelOptions input").isChecked(), true);
+    assert.equal(await page.locator("#imagePreview").isVisible(), true);
   } finally {
     await context.close();
   }

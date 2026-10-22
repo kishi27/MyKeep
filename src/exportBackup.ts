@@ -118,15 +118,10 @@ function validateLabelMetadata(value: unknown): { groups: ExportLabelGroup[]; me
   };
 }
 
-export function backupFileName(date = new Date()): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `mykeep-backup-${year}-${month}-${day}.zip`;
-}
+export { backupFileName } from "./backupFileName";
 
 export async function createBackup(
-  output: BlobWriter | WritableStream<Uint8Array>,
+  output: BlobWriter | WritableStream<Uint8Array> | null,
   onProgress: (progress: BackupProgress) => void,
   fetcher: (path: string) => Promise<Response> = (path) => fetch(path),
 ): Promise<BackupResult> {
@@ -176,7 +171,7 @@ export async function createBackup(
   await verifyCounts();
   onProgress({ ...progress });
 
-  const writer = new ZipWriter<Blob | undefined>(output, { useWebWorkers: false, bufferedWrite: false, useUnicodeFileNames: true });
+  const writer = new ZipWriter<Blob | undefined>(output ?? new BlobWriter("application/zip"), { useWebWorkers: false, bufferedWrite: false, useUnicodeFileNames: true });
   const exportedNotes = [];
   for (let index = 0; index < notes.length; index++) {
     const note = notes[index];

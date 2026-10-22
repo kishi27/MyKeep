@@ -1,9 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent, DragEvent, FormEvent, ReactNode } from "react";
-import { BlobWriter } from "@zip.js/zip.js";
-import { backupFileName, createBackup } from "./exportBackup";
+import { backupFileName } from "./backupFileName";
 import type { BackupProgress, BackupResult } from "./exportBackup";
-import { readKeepZip } from "./keepImport";
 import type { KeepZipResult } from "./keepImport";
 import { BackupRestorePanel } from "./BackupRestorePanel";
 import { ListFilters } from "./SearchFiltersPanel";
@@ -1657,6 +1655,7 @@ function MyKeep() {
     setImportProgress(null);
     let extracted: KeepZipResult | null = null;
     try {
+      const { readKeepZip } = await import("./keepImport");
       extracted = await readKeepZip(file);
       const progress: ImportProgress = {
         notes: { done: extracted.failed + extracted.skipped, total: extracted.total,
@@ -1735,7 +1734,9 @@ function MyKeep() {
           types: [{ description: "ZIP", accept: { "application/zip": [".zip"] } }] });
         fileStream = await handle.createWritable();
       }
-      const result = await createBackup(fileStream ?? new BlobWriter("application/zip"), setExportProgress);
+      // Open the picker above before awaiting any code download.
+      const { createBackup } = await import("./exportBackup");
+      const result = await createBackup(fileStream, setExportProgress);
       if (result.blob) {
         const url = URL.createObjectURL(result.blob);
         const link = document.createElement("a");

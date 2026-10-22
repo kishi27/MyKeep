@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 import { useI18n } from "./i18n";
-import { readBackupZip, restoreBackup } from "./restoreBackup";
 import type { RestoreArchive, RestoreProgress } from "./restoreBackup";
 import { pinSnapshot } from "./pinLock";
 
@@ -29,6 +28,7 @@ export function BackupRestorePanel({ busy, onBusy, onComplete }: {
     try {
       await archiveRef.current?.close();
       archiveRef.current = null;
+      const { readBackupZip } = await import("./restoreBackup");
       const extracted = await readBackupZip(file);
       archiveRef.current = extracted;
       setArchive(extracted);
@@ -44,6 +44,7 @@ export function BackupRestorePanel({ busy, onBusy, onComplete }: {
     setMessage("追加復元中…");
     setProgress(null);
     try {
+      const { restoreBackup } = await import("./restoreBackup");
       const result = await restoreBackup(archive, setProgress);
       setMessage(result.partial ? "追加復元が終了しました。一部のデータは復元されていません。" : "追加復元が完了しました。");
     } catch {

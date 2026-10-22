@@ -334,6 +334,13 @@ function noteListFilter(params: URLSearchParams) {
   const dateColumn = dateField === "created" ? "created_at" : "updated_at";
   if (from) { conditions.push(`${dateColumn} >= ?`); bindings.push(from); }
   if (before) { conditions.push(`${dateColumn} < ?`); bindings.push(before); }
+  // pinned is constrained to 0/1 by the schema. Enumerating both values lets
+  // SQLite seek each pin group's date range instead of scanning the entire list.
+  // Keep cross-field filters on their existing plan to avoid a broad range sort.
+  if ((from || before) && (sort ?? "updated_desc").startsWith(`${dateField}_`)
+    && view !== "trash" && view !== "pinned" && view !== "unpinned") {
+    conditions.push("pinned IN (0, 1)");
+  }
   const dateOrder = sort === null ? (view === "trash" ? "deleted_at DESC, id DESC" : sorts.updated_desc) : sorts[sort];
   const order = view === "trash" || view === "pinned" || view === "unpinned" ? dateOrder : `pinned DESC, ${dateOrder}`;
   return { where: conditions.join(" AND "), bindings, order };

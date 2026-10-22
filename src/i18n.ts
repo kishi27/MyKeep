@@ -9,6 +9,8 @@ export function savedLanguage(): Language {
 
 // Japanese keys also serve as the original text for messages kept in component state.
 const english = {
+  "日付絞り込み": "Date filters", "名前変更": "Rename", "新しい条件名": "New search name",
+  "条件の名前を変更しました。": "Search renamed.",
   "日付絞り込み・保存した条件": "Date filters and saved searches",
   "日付絞り込み中": "Date filter active", "対象の日付": "Date field", "開始日": "From date", "終了日": "Through date",
   "日付をクリア": "Clear dates", "開始日は終了日以前にしてください。": "The start date must be on or before the end date.",

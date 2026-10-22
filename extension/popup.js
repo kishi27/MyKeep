@@ -24,6 +24,7 @@ const save = document.getElementById("save");
 const openNote = document.getElementById("openNote");
 const duplicatePanel = document.getElementById("duplicatePanel");
 const duplicateStatus = document.getElementById("duplicateStatus");
+const saveWithoutWaiting = document.getElementById("saveWithoutWaiting");
 const duplicateList = document.getElementById("duplicateList");
 const duplicateMore = document.getElementById("duplicateMore");
 const duplicateConfirm = document.getElementById("duplicateConfirm");
@@ -50,6 +51,8 @@ let duplicateSavedWithoutId = false;
 let duplicateEndpoint = "";
 let duplicateConfirmationOpen = false;
 let duplicateCheckToken = 0;
+let duplicateCheckController = null;
+let duplicateCheckTimeoutId = null;
 let isSaving = false;
 
 function renderStatus() {
@@ -77,6 +80,7 @@ function hasDuplicateMatches() {
 function renderDuplicatePanel() {
   duplicateList.replaceChildren();
   duplicateMore.hidden = true;
+  saveWithoutWaiting.hidden = duplicateCheckState !== "checking";
   duplicateConfirm.hidden = !duplicateConfirmationOpen;
 
   if (duplicateCheckState === "idle" || (duplicateCheckState === "ready" && !hasDuplicateMatches())) {
@@ -89,8 +93,12 @@ function renderDuplicatePanel() {
     duplicateStatus.textContent = t("popup.duplicatesChecking");
   } else if (duplicateCheckState === "unavailable") {
     duplicateStatus.textContent = t("popup.duplicateCheckFailed");
+  } else if (duplicateCheckState === "skipped" && !hasDuplicateMatches()) {
+    duplicateStatus.textContent = t("popup.duplicateCheckSkipped");
   } else {
     duplicateStatus.textContent = t("popup.duplicatesFound");
+  }
+  if (hasDuplicateMatches()) {
     for (const note of duplicateNotes) {
       const item = document.createElement("li");
       let label = null;
@@ -119,16 +127,25 @@ function renderDuplicatePanel() {
   }
 }
 
+function invalidateDuplicateCheck(nextState) {
+  if (duplicateCheckState !== "checking") return false;
+  duplicateCheckToken += 1;
+  duplicateCheckController?.abort();
+  duplicateCheckController = null;
+  if (duplicateCheckTimeoutId !== null) clearTimeout(duplicateCheckTimeoutId);
+  duplicateCheckTimeoutId = null;
+  duplicateCheckState = nextState;
+  return true;
+}
+
 function checkDuplicatesForUrl(pageUrl) {
+  duplicateCheckController?.abort();
+  if (duplicateCheckTimeoutId !== null) clearTimeout(duplicateCheckTimeoutId);
   const checkToken = ++duplicateCheckToken;
   const controller = new AbortController();
+  duplicateCheckController = controller;
   let timedOut = false;
   duplicateCheckState = "checking";
-  duplicateNotes = [];
-  duplicateHasMore = false;
-  duplicateSavedWithoutId = false;
-  duplicateEndpoint = "";
-  duplicateConfirmationOpen = false;
   renderDuplicatePanel();
   setSaveEnabled();
 
@@ -136,11 +153,14 @@ function checkDuplicatesForUrl(pageUrl) {
     timedOut = true;
     controller.abort();
     if (checkToken === duplicateCheckToken) {
+      duplicateCheckController = null;
+      duplicateCheckTimeoutId = null;
       duplicateCheckState = "unavailable";
       renderDuplicatePanel();
       setSaveEnabled();
     }
   }, DUPLICATE_CHECK_TIMEOUT_MS);
+  duplicateCheckTimeoutId = timeoutId;
 
   void (async () => {
     try {
@@ -191,8 +211,27 @@ function checkDuplicatesForUrl(pageUrl) {
       setSaveEnabled();
     } finally {
       clearTimeout(timeoutId);
+      if (checkToken === duplicateCheckToken) {
+        duplicateCheckController = null;
+        duplicateCheckTimeoutId = null;
+      }
     }
   })();
+}
+
+function bypassDuplicateCheck() {
+  if (!invalidateDuplicateCheck("skipped")) return;
+  if (hasDuplicateMatches()) {
+    duplicateConfirmationOpen = true;
+    renderDuplicatePanel();
+    setSaveEnabled();
+    confirmAdd.focus();
+    return;
+  }
+  duplicateConfirmationOpen = false;
+  renderDuplicatePanel();
+  setSaveEnabled();
+  void saveCapture();
 }
 
 function isHttpUrl(value) {
@@ -217,6 +256,7 @@ function setSaveEnabled() {
   const validUrl = isHttpUrl(url.value) && url.value.length <= 2000;
   save.hidden = duplicateConfirmationOpen;
   save.disabled = !validUrl || duplicateCheckState === "checking" || isSaving;
+  saveWithoutWaiting.disabled = isSaving;
   confirmAdd.disabled = !validUrl || isSaving;
   cancelAdd.disabled = isSaving;
 }
@@ -479,6 +519,10 @@ async function loadLabels() {
 
 async function loadPage() {
   titleEdited = false;
+  duplicateCheckController?.abort();
+  duplicateCheckController = null;
+  if (duplicateCheckTimeoutId !== null) clearTimeout(duplicateCheckTimeoutId);
+  duplicateCheckTimeoutId = null;
   duplicateCheckToken += 1;
   duplicateCheckState = "idle";
   duplicateNotes = [];
@@ -591,6 +635,7 @@ document.addEventListener("click", (event) => {
 title.addEventListener("input", () => { titleEdited = true; });
 
 document.getElementById("removeImage").addEventListener("click", clearImage);
+saveWithoutWaiting.addEventListener("click", bypassDuplicateCheck);
 openNote.addEventListener("click", async () => {
   if (!savedNoteUrl) return;
   try {

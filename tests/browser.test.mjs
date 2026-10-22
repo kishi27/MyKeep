@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { pbkdf2Sync } from "node:crypto";
 import { test } from "node:test";
+import { BlobWriter, TextReader, ZipWriter } from '@zip.js/zip.js';
 
 const PROJECT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST_DIR = resolve(PROJECT_DIR, "dist");
@@ -344,7 +345,7 @@ test("built MyKeep dist keeps PIN privacy, unsaved drafts, dates, and sort order
           const page = await context.newPage();
           await page.goto(url);
           await unlock(page);
-          await page.locator('.list-filters summary').click();
+          await page.locator('.date-filter-panel summary').click();
           const filters = page.locator('.list-filters');
           await filters.getByLabel('開始日', { exact: true }).fill('2026-02-01');
           await filters.getByLabel('終了日', { exact: true }).fill('2026-02-01');
@@ -353,27 +354,45 @@ test("built MyKeep dist keeps PIN privacy, unsaved drafts, dates, and sort order
           assert.ok(state.calls.some(c => c.path.includes('from=2026-01-31T15') && c.path.includes('before=2026-02-01T15')));
           await page.evaluate(() => window.dispatchEvent(new Event('focus')));
           await page.waitForFunction(() => document.querySelectorAll('.card').length === 1);
+          await page.locator('.date-filter-panel summary').click();
+          assert.match(await filters.locator('.filter-active').innerText(), /作成日時: 2026-02-01 ～ 2026-02-01/);
+          assert.equal(await filters.getByLabel('開始日', { exact: true }).isVisible(), false);
+          await page.locator('.saved-search-panel summary').click();
           await filters.getByLabel('条件の名前').fill('二月の仕事');
           await filters.getByRole('button', { name: '現在の条件を保存' }).click();
-          await filters.getByRole('button', { name: '日付をクリア' }).click();
+          await filters.getByRole('button', { name: '名前変更', exact: true }).click();
+          const renameInput = filters.getByLabel('新しい条件名', { exact: true });
+          assert.equal(await renameInput.evaluate(el => document.activeElement === el), true);
+          await renameInput.fill('二月の条件（変更済み）');
+          await renameInput.press('Enter');
+          const savedBeforeReload = await page.evaluate(() => JSON.parse(localStorage.getItem('mykeep.savedSearches')));
+          assert.equal(savedBeforeReload[0].name, '二月の条件（変更済み）');
+          assert.equal(savedBeforeReload[0].dates.from, '2026-02-01');
+          await filters.locator('.filter-active button').click();
           await assertNoteOrder(page, SORT_EXPECTATIONS.updated_desc);
           await page.reload(); await unlock(page);
-          await page.locator('.list-filters summary').click();
-          await filters.getByLabel('保存した条件', { exact: true }).selectOption({ label: '二月の仕事' });
+          await page.locator('.saved-search-panel summary').click();
+          await filters.getByLabel('保存した条件', { exact: true }).selectOption({ label: '二月の条件（変更済み）' });
           await filters.getByRole('button', { name: '呼び出す', exact: true }).click();
           await assertNoteOrder(page, ['中間']);
           await assertNoHorizontalOverflow(page);
           if (process.env.MYKEEP_SCREENSHOTS) await page.screenshot({ path: `.wrangler/filters-${target.name.replace(/\W+/g, '-')}.png` });
           await filters.getByRole('button', { name: '条件を削除' }).click();
           assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('mykeep.savedSearches')).length), 0);
+          await page.locator('.date-filter-panel summary').click();
           await filters.getByLabel('開始日', { exact: true }).fill('2026-03-01');
           assert.equal(await filters.getByRole('button', { name: '適用', exact: true }).isDisabled(), true);
-          await filters.getByRole('button', { name: '日付をクリア' }).click();
+          await filters.locator('.date-filter').getByRole('button', { name: '日付をクリア' }).click();
           await page.getByRole('button', { name: '作成が古いを読む', exact: true }).click();
           const reader = page.getByRole('dialog', { name: 'メモを読む', exact: true });
           assert.equal(await reader.locator('.reader-body').innerText(), longBody);
           assert.equal(await page.evaluate(() => window.readerInjected), undefined);
           assert.equal(await reader.locator('input,textarea').count(), 0);
+          await reader.evaluate(el => { el.scrollTop = el.scrollHeight; });
+          const sticky = await reader.locator('.editor-heading').boundingBox();
+          const readerBox = await reader.boundingBox();
+          assert.ok(sticky.y >= readerBox.y && sticky.y < readerBox.y + 40, 'reader controls stay at the top while reading');
+          assert.ok(sticky.y + sticky.height <= readerBox.y + readerBox.height);
           await assertNoHorizontalOverflow(page);
           await reader.getByRole('button', { name: '読取画像.pngを拡大表示', exact: true }).click();
           assert.match(await page.locator('.image-viewer-toolbar').innerText(), /1 \/ 2/);
@@ -473,6 +492,62 @@ test("built MyKeep dist keeps PIN privacy, unsaved drafts, dates, and sort order
         }
       });
     }
+    await t.test('ZIP code is deferred until file selection; restore loading failures release controls', async () => {
+      const context = await makeContext(browser, browserTargets()[0]);
+      try {
+        await mockApi(context);
+        const page = await context.newPage();
+        const scripts = [];
+        page.on('request', request => { if (request.resourceType() === 'script') scripts.push(request.url()); });
+        await page.goto(url); await page.locator('.card').first().waitFor();
+        assert.equal(scripts.some(path => /(?:zip\.js|keepImport|exportBackup|restoreBackup)-/.test(path)), false);
+        await page.getByRole('button', { name: '設定メニュー' }).click();
+        await page.getByRole('menuitem', { name: 'インポート', exact: true }).click();
+        const panel = page.getByRole('dialog', { name: 'インポート', exact: true });
+        await panel.getByRole('button', { name: 'MyKeepバックアップから復元', exact: true }).click();
+        assert.equal(scripts.some(path => /(?:zip\.js|restoreBackup)-/.test(path)), false);
+        await context.route('**/restoreBackup-*.js', route => route.abort());
+        await panel.locator('input[type=file]').setInputFiles({ name: 'failure.zip', mimeType: 'application/zip', buffer: Buffer.from('test') });
+        await panel.getByRole('status').waitFor();
+        await page.waitForFunction(() => !document.querySelector('.restore-backup input').disabled);
+        assert.match(await panel.getByRole('status').innerText(), /import|fetch|module/i);
+        await panel.getByRole('button', { name: 'Google Keep Takeout', exact: true }).click();
+        const zip = new ZipWriter(new BlobWriter(), { useWebWorkers: false });
+        await zip.add('Takeout/Keep/empty.json', new TextReader(JSON.stringify({ title: '', textContent: '' })));
+        const buffer = Buffer.from(await (await zip.close()).arrayBuffer());
+        await panel.locator('input[type=file]').setInputFiles({ name: 'keep.zip', mimeType: 'application/zip', buffer });
+        await panel.getByRole('status').filter({ hasText: 'インポート完了' }).waitFor();
+        assert.ok(scripts.some(path => /keepImport-/.test(path)));
+        assert.ok(scripts.some(path => /zip\.js-/.test(path)));
+        await panel.getByRole('button', { name: '閉じる', exact: true }).click();
+      } finally { await context.close(); }
+    });
+
+    await t.test('save picker runs before the export chunk is requested', async () => {
+      const context = await makeContext(browser, browserTargets()[0]);
+      try {
+        await mockApi(context);
+        const page = await context.newPage();
+        await page.goto(url); await page.locator('.card').first().waitFor();
+        await page.evaluate(() => {
+          window.pickerCalled = false;
+          window.showSaveFilePicker = async () => {
+            window.pickerCalled = navigator.userActivation.isActive;
+            return { createWritable: async () => new WritableStream({ write() {}, close() {} }) };
+          };
+        });
+        let pickerBeforeChunk = false;
+        await context.route('**/exportBackup-*.js', async route => {
+          pickerBeforeChunk = await page.evaluate(() => window.pickerCalled);
+          await route.continue();
+        });
+        await page.getByRole('button', { name: '設定メニュー' }).click();
+        await page.getByRole('menuitem', { name: 'エクスポート', exact: true }).click();
+        await page.waitForFunction(() => localStorage.getItem('mykeep.lastBackup') !== null);
+        assert.equal(pickerBeforeChunk, true);
+      } finally { await context.close(); }
+    });
+
     await t.test('backup record updates only after export and distinguishes partial, cancel and file write', async () => {
       const context = await makeContext(browser, browserTargets()[0]);
       try {
