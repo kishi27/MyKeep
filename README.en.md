@@ -68,6 +68,8 @@ Open the local URL shown in the terminal. ``npm run dev`` builds the app and ser
 
 Run `npm test` for regression checks using isolated local D1/R2: deletion/restore races, stale label edits, date sorting, Capture, ZIP extraction and additional restore. No production data is used. After `npm run build`, run `npm run test:browser` with Playwright and Chrome available to check PIN, unsaved state and UI interactions (set `PLAYWRIGHT_MODULE` to the Playwright module path if needed). Phone tests emulate devices in a browser and do not replace physical Safari/PWA testing.
 
+`npm run test:extension` mocks Chrome APIs and requests to check duplicate warnings, saving another copy, cancellation, and input retention after network failures.
+
 To try the Chrome extension locally, set ``CAPTURE_API_KEY=<your-generated-key>`` in the Git-ignored ``.dev.vars`` file. Set the extension’s API URL to the local URL followed by ``/api/capture``, for example ``http://127.0.0.1:8787/api/capture``.
 
 ## Fork this repository on GitHub
@@ -139,6 +141,8 @@ The flow is: bring in changes from the official repository → review the change
 - **Create**: Select “+ New note” in the header, enter a title, note text, URL, or other details, and save. The note editor starts with three lines of text and can be resized vertically.
 - **Edit**: Open a card to edit it. Color, pin, and archive controls appear side by side. Long text is shortened in the list, but the saved data is not truncated. The display limits are three lines for note titles, two for note text, two for link titles, and three for link descriptions.
 - **Dates and sorting**: Cards show their creation date; the editor shows both creation and update timestamps. Choose newest or oldest first for either date using the list's Sort selector. The default is updated, newest first. Pinned sections stay separate and sort within each section. Editing does not change a note's creation date or its date-based position when sorting by creation. The choice is saved in this browser.
+- **Date filters and saved searches**: Expand the list's filter panel, choose creation or update date, enter a range, and select Apply. The whole end date is included in the device's time zone. Combine dates with search and labels. Save, load, or delete up to 20 named combinations of view, query, label, applied dates and sort order in this browser. They do not sync across devices.
+- **Read long notes**: Select Read on a card to view the full text, checklist and images without editing. Select Edit to switch to the editor. Tapping the card's content still opens the editor as before.
 - **Images**: In the new-note or edit screen, add images with the file picker, Ctrl+V, or drag and drop. Remove pending images from their previews. For a new note, images upload one at a time after the note is saved.
 - **View images**: Click or tap a saved image in the editor to open it larger. Saved link thumbnails appear after attachment images and can also be enlarged. Select “Open original” to use the browser’s standard image-saving options. Switch between multiple images with the previous and next buttons; the viewer shows the current position. On a PC, use the left and right arrow keys to move and Escape to close. On phones, swipe to move between images.
 - **Pin and archive**: Use the buttons at the bottom of a card. After unpinning a note, select “Undo” within five seconds to restore the pin. Open archived notes from “Archive” in the sidebar.
@@ -180,7 +184,7 @@ Names are checked for duplicates after trimming surrounding spaces and applying 
 
 ## Chrome extension
 
-**MyKeep Capture v0.3.5** supports Chrome Manifest V3 and Chrome 120 or later. The label selector displays labels by group.
+**MyKeep Capture v0.3.6** supports Chrome Manifest V3 and Chrome 120 or later. The label selector displays labels by group.
 
 ### Install and configure
 
@@ -195,6 +199,8 @@ Names are checked for duplicates after trimming surrounding spaces and applying 
 The API URL and API key are stored in ``chrome.storage.local``. HTTPS is required; HTTP is allowed for local development on ``localhost`` or ``127.0.0.1``.
 
 ### Save the current page
+
+The popup checks for saved notes with the exact page URL, including archived and trashed notes but excluding notes undergoing permanent deletion. Open an existing note or confirm Save another anyway to create another copy. Query strings and fragments are preserved. If the check is unavailable, a message is shown and saving remains possible. This is a warning, not a guarantee against simultaneous duplicate saves on other devices.
 
 Select the toolbar icon to fetch the current page’s title and URL. You can freely edit the title before saving (up to 300 characters); if a URL is present, it can be saved with an empty title. A title you have entered is not overwritten by a later fetch.
 
@@ -286,6 +292,8 @@ If an attachment cannot be fetched, Export continues when possible and sets that
 Do not change data from another tab or device while Export is running. Changes to content, labels, or attachments during retrieval abort the backup and ask you to retry, even if counts stay the same. Export also waits until pending permanent deletion finishes. Unused labels and empty groups are included. Re-importing this ZIP into Google Keep is not guaranteed.
 
 Permanent deletion records the note and attachment keys in D1 before deleting R2 objects, then removes the note after success. Restore is rejected once deletion starts. Interrupted deletion remains recorded and is retried by another delete operation or the next daily cleanup. Label rename/deletion also updates affected notes' timestamps, so an older editor on another device cannot silently restore outdated labels. Automatic refresh checks the first 50 notes plus one revision number to detect attachment, label, and later-page changes.
+
+Settings shows this browser's last completed Export date, note count and failed attachment count. Direct saves are marked as ZIP file write completed; ordinary downloads as ZIP generated; download started. Failed attachments are flagged as an incomplete backup. Export failures and cancelled save dialogs do not update the record. The record cannot confirm download completion or whether the file still exists, so also check the save location.
 
 ### Restore from a MyKeep backup
 

@@ -6,6 +6,7 @@
   "scripts": {
     "test": "node --test tests/regression.test.mjs",
     "test:browser": "node --test tests/browser.test.mjs",
+    "test:extension": "node --test tests/extension.test.mjs",
     "build": "wrangler types && tsc --noEmit && vite build",
     "dev": "npm run build && wrangler dev",
     "db:local": "wrangler d1 migrations apply mykeep --local",

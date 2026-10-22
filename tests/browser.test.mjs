@@ -86,22 +86,35 @@ function sortNotes(sort, notes = NOTE_FIXTURES) {
 }
 
 async function mockApi(context) {
-  const state = { calls: [], revision: 1, notes: NOTE_FIXTURES.map((note) => ({ ...note })) };
+  const state = { calls: [], revision: 1, notes: NOTE_FIXTURES.map((note) => ({ ...note })), exportFailure: false };
   await context.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     state.calls.push({ method: request.method(), path: `${url.pathname}${url.search}` });
+    const params = url.searchParams;
+    const field = params.get('date_field') === 'updated' ? 'updated_at' : 'created_at';
+    const matches = state.notes.filter(note => (!params.get('from') || note[field] >= params.get('from'))
+      && (!params.get('before') || note[field] < params.get('before'))
+      && (!params.get('q') || `${note.title}${note.body}`.includes(params.get('q'))));
+    if (url.pathname === '/api/export/counts') {
+      return route.fulfill({ status: state.exportFailure ? 500 : 200, contentType: 'application/json', body: JSON.stringify({
+        notes: state.notes.length, attachments: state.notes.reduce((n, note) => n + note.attachments.length, 0),
+        max_id: [...state.notes].sort((a,b) => a.id.localeCompare(b.id)).at(-1)?.id ?? null, revision: state.revision,
+      }) });
+    }
+    if (url.pathname === '/api/export/notes') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ notes: [...state.notes].sort((a,b) => a.id.localeCompare(b.id)), hasMore: false }) });
+    if (url.pathname === '/api/files/missing') return route.fulfill({ status: 404, body: 'missing' });
 
     if (url.pathname === "/api/notes/check") {
       return route.fulfill({
         contentType: "application/json",
-        body: JSON.stringify({ notes: sortNotes(url.searchParams.get("sort"), state.notes).map(({ id, updated_at }) => ({ id, updated_at })), revision: state.revision }),
+        body: JSON.stringify({ notes: sortNotes(url.searchParams.get("sort"), matches).map(({ id, updated_at }) => ({ id, updated_at })), revision: state.revision }),
       });
     }
     if (url.pathname === "/api/notes") {
       return route.fulfill({
         contentType: "application/json",
-        body: JSON.stringify({ notes: sortNotes(url.searchParams.get("sort"), state.notes), hasMore: false, revision: state.revision }),
+        body: JSON.stringify({ notes: sortNotes(url.searchParams.get("sort"), matches), hasMore: false, revision: state.revision }),
       });
     }
     if (url.pathname === "/api/labels") {
@@ -201,6 +214,7 @@ async function makeContext(browser, target, { fakeVisibility = false } = {}) {
     timezoneId: "Asia/Tokyo",
     serviceWorkers: "block",
   });
+  context.setDefaultTimeout(8000);
   if (fakeVisibility) {
     await context.addInitScript(({ pinRecord, start }) => {
       localStorage.setItem("mykeep.language", "ja");
@@ -317,6 +331,80 @@ test("built MyKeep dist keeps PIN privacy, unsaved drafts, dates, and sort order
         }
       });
 
+      await t.test(`${target.name}: date filters, saved searches and read-only long notes`, async () => {
+        const context = await makeContext(browser, target, { fakeVisibility: true });
+        try {
+          const state = await mockApi(context);
+          const longBody = '長文の本文\n'.repeat(150) + '<script>window.readerInjected=true</script>全文の末尾';
+          state.notes[0].body = longBody;
+          state.notes[0].checklist = [{ id: 'check', text: '読むだけの項目', checked: true, position: 0 }];
+          state.notes[0].attachments = [{ id: 'reader-img', filename: '読取画像.png', mime_type: 'image/png', url: '/reader-test.png', created_at: '2026-01-01T00:00:00.000Z' }];
+          state.notes[0].preview_image = 'https://preview.example/reader-test.png';
+          await context.route('**/reader-test.png', route => route.fulfill({ contentType: 'image/png', body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9t8AAAAASUVORK5CYII=', 'base64') }));
+          const page = await context.newPage();
+          await page.goto(url);
+          await unlock(page);
+          await page.locator('.list-filters summary').click();
+          const filters = page.locator('.list-filters');
+          await filters.getByLabel('開始日', { exact: true }).fill('2026-02-01');
+          await filters.getByLabel('終了日', { exact: true }).fill('2026-02-01');
+          await filters.getByRole('button', { name: '適用', exact: true }).click();
+          await assertNoteOrder(page, ['中間']);
+          assert.ok(state.calls.some(c => c.path.includes('from=2026-01-31T15') && c.path.includes('before=2026-02-01T15')));
+          await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+          await page.waitForFunction(() => document.querySelectorAll('.card').length === 1);
+          await filters.getByLabel('条件の名前').fill('二月の仕事');
+          await filters.getByRole('button', { name: '現在の条件を保存' }).click();
+          await filters.getByRole('button', { name: '日付をクリア' }).click();
+          await assertNoteOrder(page, SORT_EXPECTATIONS.updated_desc);
+          await page.reload(); await unlock(page);
+          await page.locator('.list-filters summary').click();
+          await filters.getByLabel('保存した条件', { exact: true }).selectOption({ label: '二月の仕事' });
+          await filters.getByRole('button', { name: '呼び出す', exact: true }).click();
+          await assertNoteOrder(page, ['中間']);
+          await assertNoHorizontalOverflow(page);
+          if (process.env.MYKEEP_SCREENSHOTS) await page.screenshot({ path: `.wrangler/filters-${target.name.replace(/\W+/g, '-')}.png` });
+          await filters.getByRole('button', { name: '条件を削除' }).click();
+          assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('mykeep.savedSearches')).length), 0);
+          await filters.getByLabel('開始日', { exact: true }).fill('2026-03-01');
+          assert.equal(await filters.getByRole('button', { name: '適用', exact: true }).isDisabled(), true);
+          await filters.getByRole('button', { name: '日付をクリア' }).click();
+          await page.getByRole('button', { name: '作成が古いを読む', exact: true }).click();
+          const reader = page.getByRole('dialog', { name: 'メモを読む', exact: true });
+          assert.equal(await reader.locator('.reader-body').innerText(), longBody);
+          assert.equal(await page.evaluate(() => window.readerInjected), undefined);
+          assert.equal(await reader.locator('input,textarea').count(), 0);
+          await assertNoHorizontalOverflow(page);
+          await reader.getByRole('button', { name: '読取画像.pngを拡大表示', exact: true }).click();
+          assert.match(await page.locator('.image-viewer-toolbar').innerText(), /1 \/ 2/);
+          await page.keyboard.press('ArrowRight');
+          assert.match(await page.locator('.image-viewer-toolbar').innerText(), /2 \/ 2/);
+          assert.equal(await page.getByRole('link', { name: '元画像を開く', exact: true }).getAttribute('rel'), 'noopener noreferrer');
+          await page.keyboard.press('Escape');
+          assert.equal(await reader.isVisible(), true);
+          await page.evaluate(() => { window.setTestVisibility('hidden'); window.advanceTestTime(61000); window.setTestVisibility('visible'); });
+          await waitForPinPhase(page, 'locked'); assert.equal(await reader.isVisible(), false);
+          await unlock(page); assert.equal(await reader.isVisible(), true);
+          await reader.getByRole('button', { name: '編集する', exact: true }).click();
+          assert.equal(await page.locator('form.editor textarea').inputValue(), longBody);
+          await page.locator('form.editor button.close').click();
+          await page.getByRole('button', { name: '設定メニュー' }).click();
+          await page.getByRole('menuitem', { name: '設定', exact: true }).click();
+          const settings = page.getByRole('dialog', { name: '設定', exact: true });
+          await settings.getByRole('checkbox', { name: 'ダークモード' }).check();
+          await settings.locator('select').first().selectOption('en');
+          await page.getByRole('dialog', { name: 'Settings', exact: true }).getByRole('button', { name: 'Close', exact: true }).click();
+          await assertNoHorizontalOverflow(page);
+          assert.equal(await filters.getByLabel('From date', { exact: true }).count(), 1);
+          await page.getByRole('button', { name: 'Read 作成が古い', exact: true }).click();
+          await assertNoHorizontalOverflow(page);
+          if (process.env.MYKEEP_SCREENSHOTS) await page.screenshot({ path: `.wrangler/reader-${target.name.replace(/\W+/g, '-')}.png` });
+          await page.keyboard.press('Escape');
+          assert.equal(await page.getByRole('dialog', { name: 'Read note', exact: true }).count(), 0);
+          assert.equal(state.calls.some(c => c.method !== 'GET'), false);
+        } finally { await context.close(); }
+      });
+
       await t.test(`${target.name}: creation and update dates match all four sort choices`, async () => {
         const context = await makeContext(browser, target);
         try {
@@ -385,6 +473,55 @@ test("built MyKeep dist keeps PIN privacy, unsaved drafts, dates, and sort order
         }
       });
     }
+    await t.test('backup record updates only after export and distinguishes partial, cancel and file write', async () => {
+      const context = await makeContext(browser, browserTargets()[0]);
+      try {
+        const state = await mockApi(context);
+        const page = await context.newPage();
+        await page.goto(url);
+        // Use Blob download first, even when desktop Chrome exposes the file picker.
+        await page.evaluate(() => { window.showSaveFilePicker = undefined; });
+        const exportNow = async () => {
+          await page.getByRole('button', { name: '設定メニュー' }).click();
+          await page.getByRole('menuitem', { name: 'エクスポート', exact: true }).click();
+        };
+        const closeExport = () => page.getByRole('dialog', { name: 'エクスポート', exact: true }).getByRole('button', { name: '閉じる', exact: true }).click();
+        state.exportFailure = true;
+        await exportNow();
+        await page.getByRole('dialog', { name: 'エクスポート', exact: true }).getByRole('status').waitFor();
+        assert.equal(await page.evaluate(() => localStorage.getItem('mykeep.lastBackup')), null);
+        await closeExport(); state.exportFailure = false;
+        const downloaded = page.waitForEvent('download');
+        await exportNow(); await downloaded;
+        await page.waitForFunction(() => localStorage.getItem('mykeep.lastBackup') !== null);
+        const first = await page.evaluate(() => localStorage.getItem('mykeep.lastBackup'));
+        assert.equal(JSON.parse(first).method, 'download'); assert.equal(JSON.parse(first).attachmentsFailed, 0);
+        await closeExport();
+        await page.evaluate(() => { window.showSaveFilePicker = async () => { throw new DOMException('Cancelled', 'AbortError'); }; });
+        await exportNow(); await closeExport();
+        assert.equal(await page.evaluate(() => localStorage.getItem('mykeep.lastBackup')), first);
+        state.notes[0].attachments = [{ id: 'missing', filename: 'missing.png', mime_type: 'image/png', url: '/api/files/missing', created_at: '2026-01-01T00:00:00.000Z' }];
+        await page.evaluate(() => { window.showSaveFilePicker = undefined; });
+        const partial = page.waitForEvent('download'); await exportNow(); await partial;
+        await page.waitForFunction(() => JSON.parse(localStorage.getItem('mykeep.lastBackup')).attachmentsFailed === 1);
+        await closeExport();
+        await page.getByRole('button', { name: '設定メニュー' }).click();
+        await page.getByRole('menuitem', { name: '設定', exact: true }).click();
+        const settings = page.getByRole('dialog', { name: '設定', exact: true });
+        assert.match(await settings.locator('.backup-record').innerText(), /完全なバックアップではありません/);
+        await settings.getByRole('button', { name: '閉じる', exact: true }).click();
+        state.notes[0].attachments = [];
+        await page.evaluate(() => {
+          window.fileWriteClosed = false;
+          window.showSaveFilePicker = async () => ({ createWritable: async () => new WritableStream({ write() {}, close() { window.fileWriteClosed = true; } }) });
+        });
+        await exportNow();
+        await page.waitForFunction(() => JSON.parse(localStorage.getItem('mykeep.lastBackup')).method === 'file');
+        assert.equal(await page.evaluate(() => window.fileWriteClosed), true);
+        await closeExport(); await page.reload();
+        assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('mykeep.lastBackup')).method), 'file');
+      } finally { await context.close(); }
+    });
   } finally {
     await browser?.close();
     await new Promise((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose()));

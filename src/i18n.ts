@@ -9,6 +9,23 @@ export function savedLanguage(): Language {
 
 // Japanese keys also serve as the original text for messages kept in component state.
 const english = {
+  "日付絞り込み・保存した条件": "Date filters and saved searches",
+  "日付絞り込み中": "Date filter active", "対象の日付": "Date field", "開始日": "From date", "終了日": "Through date",
+  "日付をクリア": "Clear dates", "開始日は終了日以前にしてください。": "The start date must be on or before the end date.",
+  "端末のタイムゾーンで、終了日を含めて絞り込みます。": "Uses this device's time zone, including the entire end date.",
+  "条件の名前": "Search name", "現在の条件を保存": "Save current search", "保存した条件": "Saved searches",
+  "条件を選択": "Select a search", "呼び出す": "Load", "条件を削除": "Delete search",
+  "条件を保存しました。": "Search saved.", "条件を適用しました。": "Search applied.", "保存した条件を削除しました。": "Saved search deleted.",
+  "このブラウザに設定を保存できませんでした。": "Could not save settings in this browser.",
+  "現在適用中の一覧・検索・ラベル・日付・並び順を、このブラウザに最大20件保存します。": "Save up to 20 combinations of view, search, label, applied dates and sort order in this browser.",
+  "読む": "Read", "{0}を読む": "Read {0}", "メモを読む": "Read note", "編集する": "Edit",
+  "完了": "Completed", "未完了": "Not completed",
+  "この端末のバックアップ記録": "Backup record on this device",
+  "ZIPファイルへの書き込み完了": "ZIP file write completed", "ZIP生成・ダウンロード開始": "ZIP generated; download started",
+  "取得できなかった添付があります。完全なバックアップではありません。": "Some attachments could not be retrieved. This backup is incomplete.",
+  "このブラウザには記録がありません。": "No record in this browser.",
+  "ファイルが端末に残っているかは確認できません。ダウンロード一覧や保存先も確認してください。": "This does not confirm the file is still on your device. Check your downloads or save location.",
+  "バックアップは完了しましたが、このブラウザに日時を保存できませんでした。": "Backup completed, but its date could not be saved in this browser.",
   "続きを再試行": "Retry loading more",
   "ログインの確認が必要です。入力内容を残したまま、別タブでMyKeepを開いてログインを確認してください。": "Please check your login. Keep your edits here and open MyKeep in another tab to sign in.",
   "通信できませんでした。接続を確認して再試行してください。ログイン切れの可能性もあるため、続く場合は別タブでMyKeepを開いて確認してください。": "Could not connect. Check your connection and retry. If this continues, open MyKeep in another tab to check whether your login has expired.",

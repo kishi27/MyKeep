@@ -6,6 +6,9 @@ import type { BackupProgress, BackupResult } from "./exportBackup";
 import { readKeepZip } from "./keepImport";
 import type { KeepZipResult } from "./keepImport";
 import { BackupRestorePanel } from "./BackupRestorePanel";
+import { ListFilters } from "./SearchFiltersPanel";
+import { EMPTY_DATES, NOTE_SORTS, addDateParams } from "./listFilters";
+import type { DateRange, ListCriteria, NoteSort, View } from "./listFilters";
 import { PinGate, PinSettings } from "./MobilePinLock";
 import { pinSnapshot } from "./pinLock";
 import { api } from "./api";
@@ -17,8 +20,6 @@ import type { Language, MessageKey } from "./i18n";
 import { NOTE_COLORS } from "./types";
 import type { Attachment, ChecklistInput, Note, NoteColor, NoteInput } from "./types";
 
-type View = "active" | "pinned" | "unpinned" | "unlabeled" | "imageless" | "archived" | "trash";
-type NoteSort = "updated_desc" | "updated_asc" | "created_desc" | "created_asc";
 type NoteDates = Pick<Note, "created_at" | "updated_at">;
 type NoteList = { notes: Note[]; hasMore: boolean; revision: number };
 type NoteCheck = { notes: Pick<Note, "id" | "updated_at">[]; revision: number };
@@ -86,7 +87,17 @@ const REFRESH_SETTING = "mykeep.autoRefreshSeconds";
 const REFRESH_SECONDS = [10, 30, 60] as const;
 type RefreshSeconds = typeof REFRESH_SECONDS[number];
 const SORT_SETTING = "mykeep.sortOrder";
-const NOTE_SORTS = ["updated_desc", "updated_asc", "created_desc", "created_asc"] as const satisfies readonly NoteSort[];
+const LAST_BACKUP_SETTING = "mykeep.lastBackup";
+type LastBackup = { at: string; notes: number; attachmentsFailed: number; method: "file" | "download" };
+function savedLastBackup(): LastBackup | null {
+  try {
+    const value = JSON.parse(localStorage.getItem(LAST_BACKUP_SETTING) ?? "null");
+    return value && typeof value.at === "string" && Number.isFinite(Date.parse(value.at))
+      && Number.isSafeInteger(value.notes) && value.notes >= 0
+      && Number.isSafeInteger(value.attachmentsFailed) && value.attachmentsFailed >= 0
+      && ["file", "download"].includes(value.method) ? value : null;
+  } catch { return null; }
+}
 
 function layoutNoteGrids(root: HTMLElement) {
   for (const grid of root.querySelectorAll<HTMLElement>(".grid")) {
@@ -182,6 +193,61 @@ function ImageViewer({ images, initialIndex, onClose }: { images: ViewerImage[];
   </div>;
 }
 
+function NoteReader({ note, onClose, onEdit }: { note: Note; onClose: () => void; onEdit: () => void }) {
+  const { t, locale } = useI18n();
+  const [imageIndex, setImageIndex] = useState<number | null>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLElement>(null);
+  const images: ViewerImage[] = note.attachments.filter((a) => IMAGE_TYPES.includes(a.mime_type))
+    .map(({ id, url, filename }) => ({ id, url, filename, kind: "attachment" }));
+  if (note.preview_image) images.push({ id: "link-preview", url: note.preview_image, filename: t("サムネイル"), kind: "preview" });
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    closeRef.current?.focus({ preventScroll: true });
+    return () => { document.body.style.overflow = overflow; previous?.focus({ preventScroll: true }); };
+  }, []);
+  useEffect(() => {
+    if (imageIndex !== null) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); onClose(); }
+      if (event.key !== "Tab") return;
+      const elements = dialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], [tabindex="0"]');
+      if (!elements?.length) return;
+      const first = elements[0], last = elements[elements.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose, imageIndex]);
+  const dateFormat = new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" });
+  return <>
+    <div className="overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="note-reader" data-color={note.color} role="dialog" aria-modal="true" aria-label={t("メモを読む")} ref={dialogRef}>
+        <div className="editor-heading"><strong>{t("メモを読む")}</strong><div>
+          {!note.deleted_at && <button type="button" className="primary" onClick={onEdit}>{t("編集する")}</button>}
+          <button type="button" className="close" ref={closeRef} aria-label={t("閉じる")} onClick={onClose}>×</button>
+        </div></div>
+        <h2>{note.title || t("無題のメモ")}</h2>
+        <div className="reader-body" tabIndex={0}>{note.body}</div>
+        {note.url && <a href={note.url} target="_blank" rel="noopener noreferrer">{note.url}</a>}
+        {note.checklist.length > 0 && <ul className="reader-checklist" aria-label={t("チェックリスト")}>{note.checklist.map((item) =>
+          <li key={item.id}><span role="img" aria-label={item.checked ? t("完了") : t("未完了")}>{item.checked ? "☑" : "☐"}</span> {item.text}</li>)}</ul>}
+        {note.labels.length > 0 && <div className="selected-labels">{note.labels.map((label) => <span className="selected-label" key={label}>{label}</span>)}</div>}
+        {images.length > 0 && <div className="reader-images">{images.map((image, index) => <button key={image.id} type="button" className="image-thumbnail"
+          aria-label={t("{0}を拡大表示", { 0: image.filename })} onClick={() => setImageIndex(index)}>
+          <img src={image.url} alt={image.filename} loading="lazy" referrerPolicy="no-referrer" /></button>)}</div>}
+        {note.attachments.filter((a) => !IMAGE_TYPES.includes(a.mime_type)).map((a) => <a key={a.id} href={a.url} download={a.filename}>{a.filename}</a>)}
+        <div className="editor-dates"><div>{t("作成日時")} <time dateTime={note.created_at}>{formatTimestamp(note.created_at, dateFormat)}</time></div>
+          <div>{t("更新日時")} <time dateTime={note.updated_at}>{formatTimestamp(note.updated_at, dateFormat)}</time></div></div>
+      </section>
+    </div>
+    {imageIndex !== null && <ImageViewer images={images} initialIndex={imageIndex} onClose={() => setImageIndex(null)} />}
+  </>;
+}
+
 function labelKey(name: string): string {
   return name.trim().normalize("NFC").toLowerCase();
 }
@@ -236,15 +302,16 @@ function firstPageChanged(current: Note[], next: NoteCheck): boolean {
     || first.some((note, index) => note.id !== next.notes[index].id || note.updated_at !== next.notes[index].updated_at);
 }
 
-function listParams(view: View, search: string, label: string, sort: NoteSort): URLSearchParams {
+function listParams(view: View, search: string, label: string, sort: NoteSort, dates: DateRange): URLSearchParams {
   const params = new URLSearchParams({ view, sort });
   if (search.trim()) params.set("q", search.trim());
   if (label) params.set("label", label);
+  addDateParams(params, dates);
   return params;
 }
 
-function listPath(view: View, search: string, label: string, offset: number, sort: NoteSort): string {
-  const params = listParams(view, search, label, sort);
+function listPath(view: View, search: string, label: string, offset: number, sort: NoteSort, dates: DateRange): string {
+  const params = listParams(view, search, label, sort, dates);
   params.set("offset", String(offset));
   return `/api/notes?${params}`;
 }
@@ -341,6 +408,10 @@ function MyKeep() {
   const editorDateFormat = new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" });
   const [view, setView] = useState<View>("active");
   const [sortOrder, setSortOrder] = useState<NoteSort>(savedSortOrder);
+  const [dateRange, setDateRange] = useState<DateRange>(EMPTY_DATES);
+  const [readingNote, setReadingNote] = useState<Note | null>(null);
+  const [lastBackup, setLastBackup] = useState<LastBackup | null>(savedLastBackup);
+  const [backupRecordError, setBackupRecordError] = useState(false);
   const [search, setSearch] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [searchComposing, setSearchComposing] = useState(false);
@@ -536,14 +607,14 @@ function MyKeep() {
     return () => { observer.disconnect(); cancelAnimationFrame(frame); };
   }, [notes, view, selecting, cardShowTitle, cardShowBody]);
   useEffect(() => {
-    const path = listPath(view, search, labelFilter, 0, sortOrder);
+    const path = listPath(view, search, labelFilter, 0, sortOrder, dateRange);
     if (path === selectionListPathRef.current) return;
     selectionListPathRef.current = path;
     setSelectedNoteIds(new Set());
     setSelecting(false);
     setBulkLabelsOpen(false);
     preservedLabelFilterRef.current = "";
-  }, [view, search, labelFilter, sortOrder]);
+  }, [view, search, labelFilter, sortOrder, dateRange]);
   useEffect(() => {
     const loaded = new Set(notes.map((note) => note.id));
     setSelectedNoteIds((current) => {
@@ -572,7 +643,7 @@ function MyKeep() {
 
   useEffect(() => {
     const controller = new AbortController();
-    const path = listPath(view, search, labelFilter, 0, sortOrder);
+    const path = listPath(view, search, labelFilter, 0, sortOrder, dateRange);
     const changedFilter = path !== lastListPathRef.current;
     lastListPathRef.current = path;
     const generation = ++listGenerationRef.current;
@@ -604,7 +675,7 @@ function MyKeep() {
         let fetchedPages = 0;
         let revision: number | null = null;
         for (let page = 0; page < pages; page++) {
-          const data = await api<NoteList>(listPath(view, search, labelFilter, page * 50, sortOrder), { signal: controller.signal });
+          const data = await api<NoteList>(listPath(view, search, labelFilter, page * 50, sortOrder, dateRange), { signal: controller.signal });
           if (page === 0) revision = data.revision;
           collected.push(...data.notes);
           fetchedPages++;
@@ -641,7 +712,7 @@ function MyKeep() {
     }
     void refresh();
     return () => controller.abort();
-  }, [view, search, labelFilter, sortOrder, reload]);
+  }, [view, search, labelFilter, sortOrder, dateRange, reload]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -675,7 +746,7 @@ function MyKeep() {
       const controller = new AbortController();
       checkControllerRef.current = controller;
       try {
-        const data = await api<NoteCheck>(`/api/notes/check?${listParams(view, search, labelFilter, sortOrder)}`, { signal: controller.signal });
+        const data = await api<NoteCheck>(`/api/notes/check?${listParams(view, search, labelFilter, sortOrder, dateRange)}`, { signal: controller.signal });
         const revisionChanged = revisionRef.current !== null && data.revision !== revisionRef.current;
         if (active && !controller.signal.aborted && !refreshingRef.current && !loadingMoreRef.current
           && !bulkWorkingRef.current && (revisionChanged || firstPageChanged(notesRef.current, data))) reloadList();
@@ -697,7 +768,7 @@ function MyKeep() {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [view, search, labelFilter, sortOrder, autoRefreshSeconds]);
+  }, [view, search, labelFilter, sortOrder, dateRange, autoRefreshSeconds]);
 
   useEffect(() => {
     const sentinel = sentinelRef.current;
@@ -707,7 +778,7 @@ function MyKeep() {
     }, { rootMargin: "0px 0px 240px 0px" });
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [notes, hasMore, loading, loadingMore, reload, view, search, labelFilter, sortOrder]);
+  }, [notes, hasMore, loading, loadingMore, reload, view, search, labelFilter, sortOrder, dateRange]);
 
   useEffect(() => () => { moreControllerRef.current?.abort(); }, []);
 
@@ -730,7 +801,7 @@ function MyKeep() {
 
   useEffect(() => {
     const content = menuOpen ? sidebarRef.current : mainContentRef.current;
-    if (!content || draft || viewerImageId || settingsOpen || labelManagerOpen || importOpen || exportOpen
+    if (!content || draft || readingNote || viewerImageId || settingsOpen || labelManagerOpen || importOpen || exportOpen
       || importing || exporting || bulkLabelsOpen || settingsMenuOpen || selecting || working || undoing) return;
     let start: { x: number; y: number } | null = null;
     let direction: "horizontal" | "vertical" | null = null;
@@ -797,7 +868,7 @@ function MyKeep() {
       content.removeEventListener("touchcancel", reset);
       reset();
     };
-  }, [draft, viewerImageId, settingsOpen, labelManagerOpen, importOpen, exportOpen, importing, exporting, bulkLabelsOpen, menuOpen, settingsMenuOpen, selecting, working, undoing]);
+  }, [draft, readingNote, viewerImageId, settingsOpen, labelManagerOpen, importOpen, exportOpen, importing, exporting, bulkLabelsOpen, menuOpen, settingsMenuOpen, selecting, working, undoing]);
 
   useEffect(() => {
     if (!richLinkPreview) return;
@@ -876,6 +947,7 @@ function MyKeep() {
   }
 
   function openEditor(note?: Note) {
+    setReadingNote(null);
     setViewerImageId(null);
     setError("");
     clearPendingImages();
@@ -1117,6 +1189,7 @@ function MyKeep() {
   }
 
   function goHome() {
+    setDateRange(EMPTY_DATES);
     setView("active");
     setLabelFilter("");
     setSearch("");
@@ -1124,6 +1197,16 @@ function MyKeep() {
     setMenuOpen(false);
     setSettingsMenuOpen(false);
     window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function loadSearch(criteria: ListCriteria) {
+    setView(criteria.view);
+    setSearchInput(criteria.search);
+    setSearch(criteria.search);
+    setLabelFilter(criteria.label);
+    setSortOrder(criteria.sort);
+    setDateRange(criteria.dates);
+    setMenuOpen(false);
   }
 
   function captureListAnchor(excludeId?: string | null): ScrollAnchor {
@@ -1161,7 +1244,7 @@ function MyKeep() {
     setLoadingMore(true);
     setMoreError("");
     try {
-      const data = await api<NoteList>(listPath(view, search, labelFilter, offset, sortOrder), { signal: controller.signal });
+      const data = await api<NoteList>(listPath(view, search, labelFilter, offset, sortOrder, dateRange), { signal: controller.signal });
       if (controller.signal.aborted || generation !== listGenerationRef.current) return;
       const ids = new Set(notesRef.current.map((note) => note.id));
       const added = data.notes.filter((note) => !ids.has(note.id));
@@ -1664,6 +1747,11 @@ function MyKeep() {
         window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
       }
       setExportResult(result);
+      const record: LastBackup = { at: new Date().toISOString(), notes: result.notes,
+        attachmentsFailed: result.attachmentsFailed, method: result.blob ? "download" : "file" };
+      setLastBackup(record);
+      try { localStorage.setItem(LAST_BACKUP_SETTING, JSON.stringify(record)); setBackupRecordError(false); }
+      catch { setBackupRecordError(true); }
       setExportMessage("エクスポート完了");
     } catch (cause) {
       if (fileStream) {
@@ -1726,6 +1814,7 @@ function MyKeep() {
         </p>}
         {createdDate && <p className="card-created"><span>{t("作成")}</span><time dateTime={note.created_at}>{createdDate}</time></p>}
         {!selecting && <div className="card-actions">
+          <button type="button" onClick={() => setReadingNote(note)} aria-label={t("{0}を読む", { 0: note.title || t("無題のメモ") })}>{t("読む")}</button>
           {view === "trash" ? <>
             <button disabled={working} onClick={() => restore(note)}>{t("復元")}</button>
             <button className="danger" disabled={working} onClick={() => permanentlyRemove(note)}>{t("完全削除")}</button>
@@ -1809,13 +1898,14 @@ function MyKeep() {
           <option value="created_asc">{t("作成日時（古い順）")}</option>
         </select>
       </div>
+      <ListFilters criteria={{ view, search: searchInput, label: labelFilter, sort: sortOrder, dates: dateRange }} onDates={setDateRange} onLoad={loadSearch} />
       {view === "trash" && <div className="trash-header">
         <p>{t("ゴミ箱内のメモは7日後に削除されます。")}</p>
         <button type="button" className="danger" disabled={working || importing || exporting || !counts?.views.trash} onClick={() => void clearTrash()}>{t("ゴミ箱を空にする")}</button>
       </div>}
       {bulkResult && <p className={bulkResult.failed ? "error" : "bulk-result"} role={bulkResult.failed ? "alert" : "status"}>{uiMessage(bulkResult.message)}</p>}
       {error && !draft && <p className="error" role="alert">{uiMessage(error)}</p>}
-      {!loading && notes.length === 0 && <p className="empty">{search.trim() || labelFilter ? t("該当するメモはありません。") : view === "active" ? t("メモはまだありません。") : view === "pinned" ? t("ピンありのメモはありません。") : view === "unpinned" ? t("ピンなしのメモはありません。") : view === "unlabeled" ? t("ラベルなしのメモはありません。") : view === "imageless" ? t("画像なしのメモはありません。") : view === "archived" ? t("アーカイブはありません。") : t("ゴミ箱は空です。")}</p>}
+      {!loading && notes.length === 0 && <p className="empty">{search.trim() || labelFilter || dateRange.from || dateRange.to ? t("該当するメモはありません。") : view === "active" ? t("メモはまだありません。") : view === "pinned" ? t("ピンありのメモはありません。") : view === "unpinned" ? t("ピンなしのメモはありません。") : view === "unlabeled" ? t("ラベルなしのメモはありません。") : view === "imageless" ? t("画像なしのメモはありません。") : view === "archived" ? t("アーカイブはありません。") : t("ゴミ箱は空です。")}</p>}
 
       {view === "trash" ? (
         <section className="grid" aria-label={t("ゴミ箱一覧")}>{notes.map(renderNoteCard)}</section>
@@ -1903,6 +1993,17 @@ function MyKeep() {
               {REFRESH_SECONDS.map((seconds) => <option key={seconds} value={seconds}>{t("{0}秒", { 0: countFormat.format(seconds) })}</option>)}
             </select>
           </label>
+          <section className="backup-record" aria-label={t("この端末のバックアップ記録")}>
+            <strong>{t("この端末のバックアップ記録")}</strong>
+            {lastBackup ? <>
+              <p><time dateTime={lastBackup.at}>{formatTimestamp(lastBackup.at, editorDateFormat)}</time><br />
+                {lastBackup.method === "file" ? t("ZIPファイルへの書き込み完了") : t("ZIP生成・ダウンロード開始")}</p>
+              <p>{t("メモ")}: {countFormat.format(lastBackup.notes)} / {t("添付失敗")}: {countFormat.format(lastBackup.attachmentsFailed)}</p>
+              {lastBackup.attachmentsFailed > 0 && <p className="error">{t("取得できなかった添付があります。完全なバックアップではありません。")}</p>}
+            </> : <p>{t("このブラウザには記録がありません。")}</p>}
+            <small>{t("ファイルが端末に残っているかは確認できません。ダウンロード一覧や保存先も確認してください。")}</small>
+            {backupRecordError && <p className="error">{t("バックアップは完了しましたが、このブラウザに日時を保存できませんでした。")}</p>}
+          </section>
           <div className="app-version">
             <strong>MyKeep</strong>
             <span>{t("バージョン")} {import.meta.env.VITE_APP_VERSION}</span>
@@ -2046,6 +2147,7 @@ function MyKeep() {
         </section>
       </div>}
 
+      {readingNote && <NoteReader note={readingNote} onClose={() => setReadingNote(null)} onEdit={() => openEditor(readingNote)} />}
       {draft && (
         <div className="overlay" onMouseDown={(event) => { if (event.target === event.currentTarget && !working) requestCloseEditor(); }}>
           <form className="editor" data-color={draft.color} onSubmit={save} onPaste={pasteImages} aria-label={editingId ? t("メモを編集") : t("新規メモ")}>

@@ -322,6 +322,18 @@ function noteListFilter(params: URLSearchParams) {
     conditions.push("EXISTS (SELECT 1 FROM note_labels nl WHERE nl.note_id = notes.id AND nl.label_key = ?)");
     bindings.push(labelKey(label));
   }
+  const dateField = params.get("date_field") ?? "created";
+  const from = params.get("from");
+  const before = params.get("before");
+  if (dateField !== "created" && dateField !== "updated") return null;
+  // Canonical UTC bounds sent from the browser's local calendar dates.
+  const validBound = (value: string) => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)
+    && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+  if ((from !== null && !validBound(from)) || (before !== null && !validBound(before))
+    || (from && before && from >= before)) return null;
+  const dateColumn = dateField === "created" ? "created_at" : "updated_at";
+  if (from) { conditions.push(`${dateColumn} >= ?`); bindings.push(from); }
+  if (before) { conditions.push(`${dateColumn} < ?`); bindings.push(before); }
   const dateOrder = sort === null ? (view === "trash" ? "deleted_at DESC, id DESC" : sorts.updated_desc) : sorts[sort];
   const order = view === "trash" || view === "pinned" || view === "unpinned" ? dateOrder : `pinned DESC, ${dateOrder}`;
   return { where: conditions.join(" AND "), bindings, order };
@@ -1097,6 +1109,7 @@ async function captureApi(request: Request, env: Env): Promise<Response> {
   if (request.method === "GET") {
     const mode = new URL(request.url).searchParams.get("mode");
     if (!mode) return listLabels(env);
+    if (mode === "duplicates") return captureDuplicates(request, env);
     if (mode === "missing-preview-count") return missingPreviewCount(env);
     if (mode === "missing-previews") return missingPreviews(request, env);
     return json({ error: "このモードには対応していません。" }, 400);
@@ -1104,6 +1117,19 @@ async function captureApi(request: Request, env: Env): Promise<Response> {
   if (request.method === "POST") return captureNote(request, env);
   if (request.method === "PUT") return fillPreview(request, env);
   return json({ error: "このメソッドには対応していません。" }, 405);
+}
+
+async function captureDuplicates(request: Request, env: Env): Promise<Response> {
+  const value = new URL(request.url).searchParams.get("url") ?? "";
+  try {
+    const parsed = new URL(value);
+    if (!value || value.length > 2000 || !["http:", "https:"].includes(parsed.protocol)) throw new Error("invalid_url");
+  } catch { return json({ error: "URLを確認してください。" }, 400); }
+  // Exact URL matching avoids silently merging distinct query strings or fragments.
+  const result = await env.DB.prepare(`SELECT id, title, archived, deleted_at FROM notes WHERE url = ?
+    AND NOT EXISTS (SELECT 1 FROM note_deletions WHERE note_id = notes.id)
+    ORDER BY updated_at DESC, id DESC LIMIT 6`).bind(value).all<{ id: string; title: string; archived: number; deleted_at: string | null }>();
+  return json({ notes: result.results.slice(0, 5).map((note) => ({ ...note, archived: Boolean(note.archived) })), hasMore: result.results.length > 5 });
 }
 
 function capturePreview(form: FormData, url: string): NotePreview {

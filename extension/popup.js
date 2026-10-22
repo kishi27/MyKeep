@@ -22,6 +22,14 @@ const imageName = document.getElementById("imageName");
 const status = document.getElementById("status");
 const save = document.getElementById("save");
 const openNote = document.getElementById("openNote");
+const duplicatePanel = document.getElementById("duplicatePanel");
+const duplicateStatus = document.getElementById("duplicateStatus");
+const duplicateList = document.getElementById("duplicateList");
+const duplicateMore = document.getElementById("duplicateMore");
+const duplicateConfirm = document.getElementById("duplicateConfirm");
+const confirmAdd = document.getElementById("confirmAdd");
+const cancelAdd = document.getElementById("cancelAdd");
+const DUPLICATE_CHECK_TIMEOUT_MS = 8000;
 let selectedImage = null;
 let previewUrl = null;
 let availableLabels = [];
@@ -35,6 +43,14 @@ let titleEdited = false;
 let statusMessage = "";
 let statusIsError = false;
 let labelStatusMessage = "";
+let duplicateCheckState = "idle";
+let duplicateNotes = [];
+let duplicateHasMore = false;
+let duplicateSavedWithoutId = false;
+let duplicateEndpoint = "";
+let duplicateConfirmationOpen = false;
+let duplicateCheckToken = 0;
+let isSaving = false;
 
 function renderStatus() {
   status.textContent = !statusMessage ? "" : statusIsError
@@ -52,6 +68,131 @@ function showStatus(message, error = false) {
   statusMessage = message;
   statusIsError = error;
   renderStatus();
+}
+
+function hasDuplicateMatches() {
+  return duplicateNotes.length > 0 || duplicateHasMore || duplicateSavedWithoutId;
+}
+
+function renderDuplicatePanel() {
+  duplicateList.replaceChildren();
+  duplicateMore.hidden = true;
+  duplicateConfirm.hidden = !duplicateConfirmationOpen;
+
+  if (duplicateCheckState === "idle" || (duplicateCheckState === "ready" && !hasDuplicateMatches())) {
+    duplicatePanel.hidden = true;
+    return;
+  }
+
+  duplicatePanel.hidden = false;
+  if (duplicateCheckState === "checking") {
+    duplicateStatus.textContent = t("popup.duplicatesChecking");
+  } else if (duplicateCheckState === "unavailable") {
+    duplicateStatus.textContent = t("popup.duplicateCheckFailed");
+  } else {
+    duplicateStatus.textContent = t("popup.duplicatesFound");
+    for (const note of duplicateNotes) {
+      const item = document.createElement("li");
+      let label = null;
+      try {
+        const href = noteUrlFromCaptureEndpoint(duplicateEndpoint, note.id);
+        const link = document.createElement("a");
+        link.href = href;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = note.title || t("popup.duplicateUntitled");
+        item.append(link);
+      } catch {
+        item.append(document.createTextNode(note.title || t("popup.duplicateUntitled")));
+      }
+      if (note.deleted_at != null) label = t("popup.duplicateTrash");
+      else if (note.archived) label = t("popup.duplicateArchived");
+      if (label) {
+        const kind = document.createElement("span");
+        kind.className = "duplicate-kind";
+        kind.textContent = label;
+        item.append(kind);
+      }
+      duplicateList.append(item);
+    }
+    duplicateMore.hidden = !duplicateHasMore;
+  }
+}
+
+function checkDuplicatesForUrl(pageUrl) {
+  const checkToken = ++duplicateCheckToken;
+  const controller = new AbortController();
+  let timedOut = false;
+  duplicateCheckState = "checking";
+  duplicateNotes = [];
+  duplicateHasMore = false;
+  duplicateSavedWithoutId = false;
+  duplicateEndpoint = "";
+  duplicateConfirmationOpen = false;
+  renderDuplicatePanel();
+  setSaveEnabled();
+
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+    if (checkToken === duplicateCheckToken) {
+      duplicateCheckState = "unavailable";
+      renderDuplicatePanel();
+      setSaveEnabled();
+    }
+  }, DUPLICATE_CHECK_TIMEOUT_MS);
+
+  void (async () => {
+    try {
+      const settings = await chrome.storage.local.get(["apiUrl", "apiKey"]);
+      if (controller.signal.aborted) return;
+      if (!settings.apiUrl || !settings.apiKey) throw new Error("duplicate_check_unavailable");
+
+      const endpoint = captureEndpoint(settings.apiUrl);
+      const requestUrl = new URL(endpoint);
+      requestUrl.searchParams.set("mode", "duplicates");
+      requestUrl.searchParams.set("url", pageUrl);
+      const response = await fetch(requestUrl.href, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${settings.apiKey}` },
+        credentials: "omit",
+        redirect: "error",
+        signal: controller.signal,
+      });
+      let result = null;
+      try {
+        result = await response.json();
+      } catch {
+        result = null;
+      }
+      if (!response.ok || !result || !Array.isArray(result.notes)) {
+        throw new Error("duplicate_check_unavailable");
+      }
+      if (checkToken !== duplicateCheckToken || controller.signal.aborted) return;
+
+      duplicateEndpoint = endpoint;
+      duplicateNotes = result.notes.filter((note) => note && typeof note === "object"
+        && typeof note.id === "string" && note.id.trim() && note.id.length <= 200)
+        .slice(0, 5)
+        .map((note) => ({
+          id: note.id,
+          title: typeof note.title === "string" ? note.title : "",
+          archived: note.archived === true,
+          deleted_at: note.deleted_at ?? null,
+        }));
+      duplicateHasMore = result.hasMore === true;
+      duplicateCheckState = "ready";
+      renderDuplicatePanel();
+      setSaveEnabled();
+    } catch {
+      if (checkToken !== duplicateCheckToken || timedOut) return;
+      duplicateCheckState = "unavailable";
+      renderDuplicatePanel();
+      setSaveEnabled();
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  })();
 }
 
 function isHttpUrl(value) {
@@ -73,7 +214,11 @@ function pageHostname(value) {
 }
 
 function setSaveEnabled() {
-  save.disabled = !isHttpUrl(url.value) || url.value.length > 2000;
+  const validUrl = isHttpUrl(url.value) && url.value.length <= 2000;
+  save.hidden = duplicateConfirmationOpen;
+  save.disabled = !validUrl || duplicateCheckState === "checking" || isSaving;
+  confirmAdd.disabled = !validUrl || isSaving;
+  cancelAdd.disabled = isSaving;
 }
 
 function limitText(value, maxLength) {
@@ -334,6 +479,14 @@ async function loadLabels() {
 
 async function loadPage() {
   titleEdited = false;
+  duplicateCheckToken += 1;
+  duplicateCheckState = "idle";
+  duplicateNotes = [];
+  duplicateHasMore = false;
+  duplicateSavedWithoutId = false;
+  duplicateEndpoint = "";
+  duplicateConfirmationOpen = false;
+  isSaving = false;
   title.value = "";
   url.value = "";
   body.value = "";
@@ -341,6 +494,7 @@ async function loadPage() {
   pagePreview = { title: "", description: "", image: "", hostname: "" };
   hideSavedNoteLink();
   showStatus("");
+  renderDuplicatePanel();
   selectedLabels = [];
   renderSelectedLabels();
   updateLabelOptionState();
@@ -354,33 +508,35 @@ async function loadPage() {
     if (!titleEdited) title.value = tabTitle;
     url.value = typeof tab?.url === "string" ? tab.url : "";
     pagePreview = { title: tabTitle, description: "", image: "", hostname: pageHostname(url.value) };
-    save.disabled = true;
-    if (!tab?.id || !isHttpUrl(url.value)) {
+    if (!isHttpUrl(url.value) || url.value.length > 2000) {
       setSaveEnabled();
       return;
     }
 
-    try {
-      const [injected] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: readPageMetadata });
-      const metadata = injected?.result;
-      if (metadata && typeof metadata === "object") {
-        if (isHttpUrl(metadata.href)) url.value = metadata.href;
-        const metadataTitle = limitText(metadata.title, 300);
-        const metadataDescription = previewText(metadata.description, 500);
-        const metadataImage = previewImageUrl(metadata.image);
-        const metadataHostname = pageHostname(url.value);
-        if (!titleEdited && typeof metadata.title === "string") title.value = metadataTitle;
-        pagePreview = {
-          title: metadataTitle || pagePreview.title,
-          description: metadataDescription,
-          image: metadataImage,
-          hostname: metadataHostname || pageHostname(url.value),
-        };
+    if (tab?.id) {
+      try {
+        const [injected] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: readPageMetadata });
+        const metadata = injected?.result;
+        if (metadata && typeof metadata === "object") {
+          if (isHttpUrl(metadata.href)) url.value = metadata.href;
+          const metadataTitle = limitText(metadata.title, 300);
+          const metadataDescription = previewText(metadata.description, 500);
+          const metadataImage = previewImageUrl(metadata.image);
+          const metadataHostname = pageHostname(url.value);
+          if (!titleEdited && typeof metadata.title === "string") title.value = metadataTitle;
+          pagePreview = {
+            title: metadataTitle || pagePreview.title,
+            description: metadataDescription,
+            image: metadataImage,
+            hostname: metadataHostname || pageHostname(url.value),
+          };
+        }
+      } catch {
+        // Restricted pages and pages that change during injection still keep the tab title and URL.
       }
-    } catch {
-      // Restricted pages and pages that change during injection still keep the tab title and URL.
     }
     setSaveEnabled();
+    if (isHttpUrl(url.value) && url.value.length <= 2000) checkDuplicatesForUrl(url.value);
   } catch {
     save.disabled = true;
     showStatus("popup.pageUnreadable", true);
@@ -457,10 +613,10 @@ document.addEventListener("paste", (event) => {
   }
 });
 
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  if (save.disabled) return;
-  save.disabled = true;
+async function saveCapture() {
+  if (isSaving || !isHttpUrl(url.value) || url.value.length > 2000) return;
+  isSaving = true;
+  setSaveEnabled();
   hideSavedNoteLink();
   showStatus("popup.saving");
   try {
@@ -470,6 +626,7 @@ form.addEventListener("submit", async (event) => {
     if (!isHttpUrl(url.value) || url.value.length > 2000) {
       throw new Error("popup.error.invalidPageUrl");
     }
+    duplicateEndpoint = endpoint;
 
     const data = new FormData();
     data.set("title", limitText(title.value, 300));
@@ -500,23 +657,65 @@ form.addEventListener("submit", async (event) => {
     clearImage();
     const noteId = result?.note?.id;
     if (typeof noteId === "string" && noteId.trim()) {
+      duplicateNotes = [
+        {
+          id: noteId,
+          title: typeof result.note.title === "string" ? result.note.title : limitText(title.value, 300),
+          archived: false,
+          deleted_at: null,
+        },
+        ...duplicateNotes.filter((note) => note.id !== noteId),
+      ].slice(0, 5);
+      duplicateSavedWithoutId = false;
       try {
         savedNoteUrl = noteUrlFromCaptureEndpoint(endpoint, noteId);
         openNote.hidden = false;
       } catch {
         hideSavedNoteLink();
       }
+    } else {
+      duplicateSavedWithoutId = true;
     }
+    duplicateCheckState = "ready";
+    duplicateConfirmationOpen = false;
+    renderDuplicatePanel();
     showStatus("popup.saved");
   } catch (error) {
     showStatus(error instanceof Error ? error.message : "popup.error.sendFailed", true);
   } finally {
+    isSaving = false;
     setSaveEnabled();
   }
+}
+
+form.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (duplicateConfirmationOpen || save.disabled || isSaving || duplicateCheckState === "checking") return;
+  if (hasDuplicateMatches()) {
+    duplicateConfirmationOpen = true;
+    renderDuplicatePanel();
+    setSaveEnabled();
+    confirmAdd.focus();
+    return;
+  }
+  void saveCapture();
+});
+
+confirmAdd.addEventListener("click", () => {
+  if (!duplicateConfirmationOpen || isSaving) return;
+  void saveCapture();
+});
+cancelAdd.addEventListener("click", () => {
+  if (isSaving) return;
+  duplicateConfirmationOpen = false;
+  renderDuplicatePanel();
+  setSaveEnabled();
+  save.focus();
 });
 
 onLanguageChange(() => {
   renderLabelOptions();
+  renderDuplicatePanel();
   if (labelStatusMessage) labelStatus.textContent = t(labelStatusMessage);
   renderStatus();
 });

@@ -18,6 +18,18 @@
     <form id="captureForm">
       <label><span data-i18n="popup.field.title">タイトル</span><input id="title" type="text" maxlength="300" /></label>
       <label><span data-i18n="popup.field.url">URL</span><input id="url" type="url" maxlength="2000" readonly /></label>
+      <section id="duplicatePanel" class="duplicate-panel" aria-live="polite" hidden>
+        <p id="duplicateStatus" class="duplicate-status"></p>
+        <ul id="duplicateList" class="duplicate-list"></ul>
+        <p id="duplicateMore" class="duplicate-more" data-i18n="popup.duplicateMore" hidden>ほかにも保存済みのメモがあります。</p>
+        <div id="duplicateConfirm" class="duplicate-confirm" hidden>
+          <p data-i18n="popup.duplicateConfirm">同じURLのメモを追加で保存しますか？</p>
+          <div class="duplicate-actions">
+            <button id="confirmAdd" type="button" class="primary" data-i18n="popup.duplicateAddAnyway">そのまま追加保存</button>
+            <button id="cancelAdd" type="button" class="secondary" data-i18n="popup.duplicateCancel">キャンセル</button>
+          </div>
+        </div>
+      </section>
       <label><span data-i18n="popup.field.note">メモ</span><textarea id="body" rows="1" maxlength="100000" data-i18n-placeholder="popup.notePlaceholder" placeholder="任意のメモ"></textarea></label>
       <section class="labels-field" aria-labelledby="labelsHeading">
         <span id="labelsHeading" class="field-label" data-i18n="popup.field.labels">ラベル</span>

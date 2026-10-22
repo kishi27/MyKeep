@@ -12,6 +12,7 @@ async function moduleFrom(path) {
 }
 const { default: worker } = await moduleFrom('worker/index.ts');
 const { createBackup } = await moduleFrom('src/exportBackup.ts');
+const { addDateParams, validDateRange, readSavedSearches } = await moduleFrom('src/listFilters.ts');
 const SECRET = 'local-regression-key';
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9t8AAAAASUVORK5CYII=', 'base64');
 
@@ -163,6 +164,56 @@ test('Worker, D1, R2 and backup regressions (isolated local data)', async (t) =>
     assert.ok(await check() > revision);
     assert.equal((await getNote(n.id)).created_at, n.created_at);
   });
+  await t.test('date filters include local end date and share search, label, paging and check conditions', async () => {
+    await reset();
+    const start = '2026-09-30T15:00:00.000Z', end = '2026-10-31T15:00:00.000Z';
+    for (const [title, created] of [['before', '2026-09-30T14:59:59.999Z'], ['first', start], ['last', '2026-10-31T14:59:59.999Z'], ['after', end]]) {
+      const n = await note({ title: `range-${title}`, labels: ['date'] });
+      await DB.prepare('UPDATE notes SET created_at = ?, updated_at = ? WHERE id = ?').bind(created, '2026-11-15T00:00:00.000Z', n.id).run();
+    }
+    const params = new URLSearchParams({ date_field: 'created', from: start, before: end, label: 'date', q: 'range-', sort: 'created_asc' });
+    const list = await (await call(`/api/notes?${params}`)).json();
+    assert.deepEqual(list.notes.map(n => n.title), ['range-first', 'range-last']);
+    assert.deepEqual((await (await call(`/api/notes/check?${params}`)).json()).notes.map(n => n.id), list.notes.map(n => n.id));
+    assert.equal((await (await call(`/api/notes?${params}&offset=1`)).json()).notes[0].title, 'range-last');
+    params.set('date_field', 'updated');
+    assert.equal((await (await call(`/api/notes?${params}`)).json()).notes.length, 0);
+    params.delete('from'); params.delete('before');
+    assert.equal((await (await call(`/api/notes?${params}`)).json()).notes.length, 4);
+    for (const invalid of ['from=2026-02-30T00:00:00.000Z', 'before=invalid', 'date_field=body', `from=${end}&before=${start}`, 'from=']) {
+      assert.equal((await call(`/api/notes?${invalid}`)).status, 400);
+      assert.equal((await call(`/api/notes/check?${invalid}`)).status, 400);
+    }
+  });
+  await t.test('duplicate URL lookup requires auth; exact matches include archive/trash and allow repeat capture', async () => {
+    await reset();
+    const target = 'https://example.com/duplicate?q=1#part';
+    const get = url => call(`/api/capture?mode=duplicates&url=${encodeURIComponent(url)}`, { headers: { Authorization: `Bearer ${SECRET}` } });
+    for (let i = 0; i < 7; i++) {
+      const n = await note({ url: target, title: `duplicate-${i}`, archived: i === 1 });
+      if (i === 2) await call(`/api/notes/${n.id}`, { method: 'DELETE' });
+    }
+    const found = await (await get(target)).json();
+    assert.equal(found.notes.length, 5); assert.equal(found.hasMore, true);
+    assert.equal((await (await get(target.replace('q=1', 'q=2'))).json()).notes.length, 0);
+    assert.equal((await (await get(target.replace('#part', ''))).json()).notes.length, 0);
+    assert.equal((await get('javascript:alert(1)')).status, 400);
+    assert.equal((await get('https://example.com/' + 'x'.repeat(2000))).status, 400);
+    assert.equal((await call('/api/capture?mode=duplicates&url=https://example.com')).status, 401);
+    assert.equal((await call('/api/capture?mode=duplicates&url=https://example.com', { headers: { Authorization: 'Bearer wrong' } })).status, 401);
+    const form = new URLSearchParams({ title: 'explicit duplicate', url: target });
+    assert.equal((await call('/api/capture', { method: 'POST', headers: { Authorization: `Bearer ${SECRET}` }, body: form })).status, 201);
+    assert.equal((await DB.prepare('SELECT COUNT(*) AS n FROM notes WHERE url = ?').bind(target).first()).n, 8);
+    await reset();
+    const archived = await note({ url: target, archived: true });
+    const trashed = await note({ url: target }); await call(`/api/notes/${trashed.id}`, { method: 'DELETE' });
+    const matches = (await (await get(target)).json()).notes;
+    assert.ok(matches.find(n => n.id === archived.id).archived);
+    assert.ok(matches.find(n => n.id === trashed.id).deleted_at);
+    await DB.prepare("INSERT INTO note_deletions VALUES (?, '[]')").bind(trashed.id).run();
+    assert.equal((await (await get(target)).json()).notes.length, 1);
+    await reset();
+  });
   await t.test('Chrome multipart and iOS urlencoded capture retain auth, pin and blank-title support', async () => {
     for (const form of [new FormData(), new URLSearchParams()]) {
       form.set('title', ''); form.set('url', 'https://example.com/capture'); form.set('pinned', 'true');
@@ -222,4 +273,21 @@ test('Worker, D1, R2 and backup regressions (isolated local data)', async (t) =>
     assert.equal(current.checklist[0].checked, true); assert.equal(current.attachments.length, 1);
     await zip.close();
   });
+});
+
+test('calendar boundaries and saved search validation', () => {
+  const previous = process.env.TZ;
+  try {
+    for (const zone of ['Asia/Tokyo', 'America/New_York']) {
+      process.env.TZ = zone;
+      const params = new URLSearchParams();
+      addDateParams(params, { field: 'created', from: '2026-03-08', to: '2026-03-08' });
+      const hours = (Date.parse(params.get('before')) - Date.parse(params.get('from'))) / 3600000;
+      assert.equal(hours, zone === 'Asia/Tokyo' ? 24 : 23);
+    }
+  } finally { if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous; }
+  assert.equal(validDateRange({ field: 'created', from: '2026-02-30', to: '' }), false);
+  const valid = { id: 'saved', name: '仕事', view: 'unpinned', search: '文章', label: '仕事', sort: 'created_asc', dates: { field: 'created', from: '2026-10-01', to: '2026-10-31' } };
+  assert.deepEqual(readSavedSearches(JSON.stringify([valid, valid, { ...valid, id: 'invalid', view: 'unknown' } ])), [valid]);
+  assert.deepEqual(readSavedSearches('{broken'), []);
 });
