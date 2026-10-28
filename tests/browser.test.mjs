@@ -46,6 +46,7 @@ const { chromium, devices } = loadPlaywright();
 function makeNote(id, title, createdAt, updatedAt) {
   return {
     id,
+    sync_version: 1,
     title,
     body: `${title}の本文`,
     url: "",
@@ -107,15 +108,26 @@ async function mockApi(context) {
     if (url.pathname === '/api/files/missing') return route.fulfill({ status: 404, body: 'missing' });
 
     if (url.pathname === "/api/notes/check") {
+      if (params.has('revision') && Number(params.get('revision')) !== state.revision) return route.fulfill({ status: 409, json: { code: 'list_changed', error: '一覧の取得中にデータが更新されました。もう一度更新してください。' } });
+      if (params.has('since') && Number(params.get('since')) === state.revision) return route.fulfill({ json: { unchanged: true, revision: state.revision } });
+      const offset = Number(params.get('offset') || 0), limit = Number(params.get('limit') || 50);
+      const ordered = sortNotes(params.get('sort'), matches);
       return route.fulfill({
         contentType: "application/json",
-        body: JSON.stringify({ notes: sortNotes(url.searchParams.get("sort"), matches).map(({ id, updated_at }) => ({ id, updated_at })), revision: state.revision }),
+        body: JSON.stringify({ notes: ordered.slice(offset, offset + limit).map(({ id, updated_at, sync_version }) => ({ id, updated_at, sync_version })), hasMore: ordered.length > offset + limit, revision: state.revision }),
       });
     }
+    if (url.pathname === '/api/notes/batch') {
+      const { ids, revision } = request.postDataJSON();
+      if (revision !== state.revision) return route.fulfill({ status: 409, json: { code: 'list_changed', error: '一覧の取得中にデータが更新されました。もう一度更新してください。' } });
+      return route.fulfill({ json: { notes: ids.map(id => state.notes.find(note => note.id === id)).filter(Boolean), revision } });
+    }
     if (url.pathname === "/api/notes") {
+      if (params.has('revision') && Number(params.get('revision')) !== state.revision) return route.fulfill({ status: 409, json: { code: 'list_changed', error: '一覧の取得中にデータが更新されました。もう一度更新してください。' } });
+      const offset = Number(params.get('offset') || 0), ordered = sortNotes(params.get('sort'), matches);
       return route.fulfill({
         contentType: "application/json",
-        body: JSON.stringify({ notes: sortNotes(url.searchParams.get("sort"), matches), hasMore: false, revision: state.revision }),
+        body: JSON.stringify({ notes: ordered.slice(offset, offset + 50), hasMore: ordered.length > offset + 50, revision: state.revision }),
       });
     }
     if (url.pathname === "/api/labels") {
@@ -479,10 +491,10 @@ test("built MyKeep dist keeps PIN privacy, unsaved drafts, dates, and sort order
 
           apiState.revision = 2;
           apiState.notes = apiState.notes.map((note) => note.id === "n-old"
-            ? { ...note, title: "サーバーで更新" }
+            ? { ...note, title: "サーバーで更新", sync_version: note.sync_version + 1 }
             : note);
           const checkResponse = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/notes/check");
-          const reloadResponse = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/notes");
+          const reloadResponse = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/notes/batch");
           await page.evaluate(() => window.dispatchEvent(new Event("focus")));
           await checkResponse;
           await reloadResponse;
@@ -492,6 +504,76 @@ test("built MyKeep dist keeps PIN privacy, unsaved drafts, dates, and sort order
         }
       });
     }
+    await t.test('lost save and image responses keep retry IDs; a new note starts a new operation', async () => {
+      const context = await makeContext(browser, browserTargets()[0]);
+      try {
+        const state = await mockApi(context);
+        const note = { ...makeNote('11111111-1111-4111-8111-111111111111', '再試行メモ', '2026-10-28T00:00:00.000Z', '2026-10-28T00:00:00.000Z'), labels: [] };
+        const creates = [], images = [];
+        await context.route('**/api/notes', async route => {
+          if (route.request().method() !== 'POST') return route.fallback();
+          creates.push(route.request().headers()['idempotency-key']);
+          if (creates.length === 1) { state.notes.unshift(note); state.revision++; return route.abort('failed'); }
+          return route.fulfill({ json: { note } });
+        });
+        await context.route(`**/api/notes/${note.id}`, async route => route.fulfill({ json: { note } }));
+        await context.route(`**/api/notes/${note.id}/attachments`, async route => {
+          images.push(route.request().headers()['idempotency-key']);
+          if (images.length === 1) return route.abort('failed');
+          return route.fulfill({ json: { attachment: { id: 'image1', url: '/test-image', filename: 'retry.png', mime_type: 'image/png' } } });
+        });
+        const page = await context.newPage(); await page.goto(url);
+        await page.locator('button.new-note').click();
+        const editor = page.locator('form.editor');
+        await editor.getByLabel('タイトル').fill('再試行メモ');
+        await editor.locator('input[type="file"]').setInputFiles({ name: 'retry.png', mimeType: 'image/png', buffer: Buffer.from('image') });
+        const save = page.locator('form.editor button[type="submit"]');
+        await save.click();
+        await page.getByText(/通信できませんでした。/).first().waitFor();
+        assert.equal(await editor.getByLabel('タイトル').inputValue(), '再試行メモ');
+        await save.click();
+        await page.getByText(/メモは保存しました。画像のアップロードに失敗/).first().waitFor();
+        assert.equal(creates.length, 2); assert.ok(creates[0]); assert.equal(creates[0], creates[1]);
+        await save.click();
+        await page.locator('form.editor').waitFor({ state: 'hidden' });
+        assert.equal(images.length, 2); assert.ok(images[0]); assert.equal(images[0], images[1]);
+        assert.equal(creates.length, 2, 'image retry must not create the note again');
+        await page.locator('button.new-note').click();
+        await page.locator('form.editor').getByLabel('タイトル').fill('再試行メモ');
+        await save.click(); await page.locator('form.editor').waitFor({ state: 'hidden' });
+        assert.notEqual(creates[2], creates[1], 'a deliberately new note is not deduplicated');
+      } finally { await context.close(); }
+    });
+
+    await t.test('deep list refresh fetches changed bodies only and preserves the scroll anchor', async () => {
+      const context = await makeContext(browser, browserTargets()[0]);
+      try {
+        const state = await mockApi(context);
+        state.notes = Array.from({ length: 120 }, (_, i) => makeNote(`many-${i}`, `一覧メモ${i}`, new Date(2026, 0, 120-i).toISOString(), new Date(2026, 0, 120-i).toISOString()));
+        const page = await context.newPage(); await page.goto(url);
+        await page.waitForFunction(() => document.querySelectorAll('.card').length === 50);
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await page.waitForFunction(() => document.querySelectorAll('.card').length >= 100);
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await page.waitForFunction(() => document.querySelectorAll('.card').length === 120);
+        await page.locator('[data-note-id="many-70"]').scrollIntoViewIfNeeded();
+        const before = await page.evaluate(() => window.scrollY);
+        state.calls.length = 0;
+        state.notes[70] = { ...state.notes[70], body: '本文だけの変更', sync_version: 2 }; state.revision++;
+        await page.getByRole('button', { name: '更新', exact: true }).click();
+        await page.getByText('本文だけの変更', { exact: true }).waitFor();
+        assert.equal(await page.locator('.card').count(), 120);
+        assert.equal(state.calls.filter(call => call.path.startsWith('/api/notes?')).length, 0, 'no complete pages are re-downloaded');
+        assert.equal(state.calls.filter(call => call.path === '/api/notes/batch').length, 1);
+        assert.ok(Math.abs(await page.evaluate(() => window.scrollY) - before) < 10);
+        state.calls.length = 0; state.revision++;
+        const refreshed = page.waitForResponse(response => response.url().includes('/api/notes/check?') && response.url().includes('revision='));
+        await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+        await refreshed;
+        assert.equal(state.calls.filter(call => call.path === '/api/notes/batch').length, 0, 'unrelated changes do not download bodies');
+      } finally { await context.close(); }
+    });
+
     await t.test('ZIP code is deferred until file selection; restore loading failures release controls', async () => {
       const context = await makeContext(browser, browserTargets()[0]);
       try {

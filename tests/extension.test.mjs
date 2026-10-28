@@ -48,6 +48,8 @@ async function openPopup({
   failDuplicateCheck = false,
   failSave = false,
   delayDuplicateCheck = false,
+  loseFirstPostResponse = false,
+  timeoutFirstPostBody = false,
   language = "ja",
   notes = duplicateFixtures,
 } = {}) {
@@ -58,8 +60,8 @@ async function openPopup({
   }));
   const page = await context.newPage();
   await page.setViewportSize({ width: 340, height: 900 });
-  await page.addInitScript(({ pageUrl, notes, failCheck, failPost, delayCheck, initialLanguage }) => {
-    const mock = window.__myKeepMock = { calls: [], posts: [], openedTabs: [] };
+  await page.addInitScript(({ pageUrl, notes, failCheck, failPost, delayCheck, loseFirstPostResponse, timeoutFirstPostBody, initialLanguage }) => {
+    const mock = window.__myKeepMock = { calls: [], posts: [], openedTabs: [], saveTimeouts: [] };
     const settings = { apiUrl: "https://keep.example/api/capture", apiKey: "extension-test-key", language: initialLanguage };
     let resolveDelayedDuplicate;
     const storageGet = async (keys) => {
@@ -93,6 +95,8 @@ async function openPopup({
         credentials: options.credentials,
         redirect: options.redirect,
         authorization: options.headers?.Authorization || "",
+        idempotencyKey: options.headers?.["Idempotency-Key"] || "",
+        signal: options.signal || null,
       };
       mock.calls.push(call);
       if (method === "GET" && call.mode === "duplicates") {
@@ -121,6 +125,30 @@ async function openPopup({
             : value;
         }
         mock.posts.push(payload);
+        const postNumber = mock.posts.length;
+        if (loseFirstPostResponse && postNumber === 1) {
+          throw new Error("popup.error.sendFailed");
+        }
+        if (timeoutFirstPostBody && postNumber === 1) {
+          return {
+            ok: true,
+            status: 201,
+            json: () => {
+              mock.responseBodyReadStarted = true;
+              return new Promise((resolveJson, rejectJson) => {
+                const rejectAborted = () => {
+                  mock.responseBodyAbortSeen = true;
+                  rejectJson(new DOMException("The operation was aborted.", "AbortError"));
+                };
+                if (options.signal?.aborted) {
+                  rejectAborted();
+                  return;
+                }
+                options.signal?.addEventListener("abort", rejectAborted, { once: true });
+              });
+            },
+          };
+        }
         if (failPost) {
           return new Response(JSON.stringify({ error: "popup.error.saveFailed" }), {
             status: 500,
@@ -134,16 +162,33 @@ async function openPopup({
       }
       return new Response("{}", { status: 404, headers: { "content-type": "application/json" } });
     };
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    const nativeClearTimeout = window.clearTimeout.bind(window);
+    window.setTimeout = (callback, delay, ...args) => {
+      if (delay === 60_000) {
+        const timeout = {
+          handle: nativeSetTimeout(() => {}, 60_000),
+          fire: () => callback(...args),
+          cleared: false,
+        };
+        mock.saveTimeouts.push(timeout);
+        mock.saveTimeoutMs = delay;
+        return timeout.handle;
+      }
+      if (delayCheck && delay === 8000) {
+        mock.duplicateTimeoutMs = delay;
+        mock.fireDuplicateTimeout = () => callback(...args);
+        return nativeSetTimeout(() => {}, 60_000);
+      }
+      return nativeSetTimeout(callback, delay, ...args);
+    };
+    window.clearTimeout = (handle) => {
+      const timeout = mock.saveTimeouts.find((entry) => entry.handle === handle);
+      if (timeout) timeout.cleared = true;
+      return nativeClearTimeout(handle);
+    };
+    mock.fireSaveTimeout = (index = 0) => mock.saveTimeouts[index]?.fire();
     if (delayCheck) {
-      const nativeSetTimeout = window.setTimeout.bind(window);
-      window.setTimeout = (callback, delay, ...args) => {
-        if (delay === 8000) {
-          mock.duplicateTimeoutMs = delay;
-          mock.fireDuplicateTimeout = () => callback(...args);
-          return nativeSetTimeout(() => {}, 60_000);
-        }
-        return nativeSetTimeout(callback, delay, ...args);
-      };
       mock.releaseDuplicateCheck = (releasedNotes) => {
         if (!resolveDelayedDuplicate) return;
         resolveDelayedDuplicate(new Response(JSON.stringify({ notes: releasedNotes, hasMore: false }), {
@@ -159,6 +204,8 @@ async function openPopup({
     failCheck: failDuplicateCheck,
     failPost: failSave,
     delayCheck: delayDuplicateCheck,
+    loseFirstPostResponse,
+    timeoutFirstPostBody,
     initialLanguage: language,
   });
   await page.goto(pathToFileURL(join(EXTENSION_DIR, "popup.html")).href);
@@ -263,6 +310,152 @@ test("zero matches save directly, then the successful save warns before another 
     await page.locator("#cancelAdd").click();
   } finally {
     await context.close();
+  }
+});
+
+test("a lost save response retries the same payload with the same idempotency key", async () => {
+  const { context, page } = await openPopup({ notes: [], loseFirstPostResponse: true });
+  try {
+    await page.waitForFunction(() => !document.querySelector("#save").disabled && document.querySelector("#duplicatePanel").hidden);
+    await page.locator("#title").fill("Retry after a lost response");
+    await page.locator("#body").fill("Keep this exact payload.");
+    await page.locator("#imageFile").setInputFiles({ name: "retry.png", mimeType: "image/png", buffer: Buffer.from("same image bytes") });
+
+    await page.locator("#save").click();
+    await page.waitForFunction(() => window.__myKeepMock.posts.length === 1
+      && document.querySelector("#status").textContent === "送信できませんでした。");
+    const first = await page.evaluate(() => ({
+      key: window.__myKeepMock.calls.find((call) => call.method === "POST").idempotencyKey,
+      payload: window.__myKeepMock.posts[0],
+    }));
+    assert.match(first.key, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    assert.deepEqual(first.payload.image, { name: "retry.png", type: "image/png", size: 16 });
+
+    await page.locator("#save").click();
+    await page.waitForFunction(() => window.__myKeepMock.posts.length === 2
+      && document.querySelector("#status").textContent === "保存しました。");
+    const retry = await page.evaluate(() => ({
+      key: window.__myKeepMock.calls.filter((call) => call.method === "POST")[1].idempotencyKey,
+      payload: window.__myKeepMock.posts[1],
+      timeoutsCleared: window.__myKeepMock.saveTimeouts.every((timeout) => timeout.cleared),
+    }));
+    assert.equal(retry.key, first.key);
+    assert.deepEqual(retry.payload, first.payload);
+    assert.equal(retry.timeoutsCleared, true);
+  } finally {
+    await context.close();
+  }
+});
+
+test("changing the submitted payload after failure creates a new idempotency key", async () => {
+  const { context, page } = await openPopup({ notes: [], loseFirstPostResponse: true });
+  try {
+    await page.waitForFunction(() => !document.querySelector("#save").disabled && document.querySelector("#duplicatePanel").hidden);
+    await page.locator("#title").fill("Changed payload");
+    await page.locator("#body").fill("First body");
+    await page.locator("#save").click();
+    await page.waitForFunction(() => window.__myKeepMock.posts.length === 1
+      && document.querySelector("#status").textContent === "送信できませんでした。");
+    const firstKey = await page.evaluate(() => window.__myKeepMock.calls.find((call) => call.method === "POST").idempotencyKey);
+
+    await page.locator("#body").fill("Changed body");
+    await page.locator("#save").click();
+    await page.waitForFunction(() => window.__myKeepMock.posts.length === 2
+      && document.querySelector("#status").textContent === "保存しました。");
+    const result = await page.evaluate(() => ({
+      secondKey: window.__myKeepMock.calls.filter((call) => call.method === "POST")[1].idempotencyKey,
+      firstBody: window.__myKeepMock.posts[0].body,
+      secondBody: window.__myKeepMock.posts[1].body,
+    }));
+    assert.notEqual(result.secondKey, firstKey);
+    assert.equal(result.firstBody, "First body");
+    assert.equal(result.secondBody, "Changed body");
+  } finally {
+    await context.close();
+  }
+});
+
+test("intentionally saving another copy after success uses a new idempotency key", async () => {
+  const { context, page } = await openPopup({ notes: [] });
+  try {
+    await page.waitForFunction(() => !document.querySelector("#save").disabled && document.querySelector("#duplicatePanel").hidden);
+    await page.locator("#title").fill("Save this copy twice");
+    await page.locator("#save").click();
+    await page.waitForFunction(() => window.__myKeepMock.posts.length === 1
+      && document.querySelector("#status").textContent === "保存しました。");
+    const firstKey = await page.evaluate(() => window.__myKeepMock.calls.find((call) => call.method === "POST").idempotencyKey);
+
+    await page.locator("#save").click();
+    assert.equal(await page.locator("#duplicateConfirm").isVisible(), true);
+    await page.locator("#confirmAdd").click();
+    await page.waitForFunction(() => window.__myKeepMock.posts.length === 2
+      && document.querySelector("#status").textContent === "保存しました。");
+    const result = await page.evaluate(() => ({
+      secondKey: window.__myKeepMock.calls.filter((call) => call.method === "POST")[1].idempotencyKey,
+      firstPayload: window.__myKeepMock.posts[0],
+      secondPayload: window.__myKeepMock.posts[1],
+      timeoutsCleared: window.__myKeepMock.saveTimeouts.every((timeout) => timeout.cleared),
+    }));
+    assert.notEqual(result.secondKey, firstKey);
+    assert.deepEqual(result.secondPayload, result.firstPayload);
+    assert.equal(result.timeoutsCleared, true);
+  } finally {
+    await context.close();
+  }
+});
+
+test("a save timeout aborts response-body reading, retains fields, and retries safely in Japanese and English", async () => {
+  for (const language of ["ja", "en"]) {
+    const { context, page } = await openPopup({ notes: [], timeoutFirstPostBody: true, language });
+    try {
+      await page.waitForFunction(() => !document.querySelector("#save").disabled && document.querySelector("#duplicatePanel").hidden);
+      await page.waitForFunction(() => !document.querySelector("#labelToggle").disabled);
+      await page.locator("#title").fill("Retain this after timeout");
+      await page.locator("#body").fill("The server may already have saved this.");
+      await page.locator("#pinned").check();
+      await page.locator("#labelToggle").click();
+      await page.locator("#labelOptions input").check();
+      await page.locator("#imageFile").setInputFiles({ name: "timeout.png", mimeType: "image/png", buffer: Buffer.from("timeout image") });
+
+      await page.locator("#save").click();
+      await page.waitForFunction(() => window.__myKeepMock.responseBodyReadStarted === true
+        && window.__myKeepMock.saveTimeoutMs === 60_000);
+      await page.evaluate(() => window.__myKeepMock.fireSaveTimeout());
+      await page.waitForFunction((message) => document.querySelector("#status").textContent.includes(message),
+        language === "en" ? "Could not confirm the save result" : "保存結果を確認できませんでした");
+
+      const first = await page.evaluate(() => ({
+        key: window.__myKeepMock.calls.find((call) => call.method === "POST").idempotencyKey,
+        aborted: window.__myKeepMock.calls.find((call) => call.method === "POST").signal.aborted,
+        bodyAbortSeen: window.__myKeepMock.responseBodyAbortSeen,
+        timeoutCleared: window.__myKeepMock.saveTimeouts[0].cleared,
+      }));
+      assert.equal(first.aborted, true);
+      assert.equal(first.bodyAbortSeen, true);
+      assert.equal(first.timeoutCleared, true);
+      if (language === "ja") assert.match(await page.locator("#status").innerText(), /保存されたかは不明/);
+      else assert.match(await page.locator("#status").innerText(), /it may have been saved/);
+      assert.equal(await page.evaluate(() => window.__myKeepMock.posts.length), 1);
+      assert.equal(await page.locator("#title").inputValue(), "Retain this after timeout");
+      assert.equal(await page.locator("#body").inputValue(), "The server may already have saved this.");
+      assert.equal(await page.locator("#pinned").isChecked(), true);
+      assert.equal(await page.locator("#labelOptions input").isChecked(), true);
+      assert.equal(await page.locator("#imagePreview").isVisible(), true);
+      assert.equal(await page.locator("#imageName").innerText(), "timeout.png");
+
+      await page.locator("#save").click();
+      await page.waitForFunction((message) => window.__myKeepMock.posts.length === 2
+        && document.querySelector("#status").textContent === message,
+      language === "en" ? "Saved." : "保存しました。");
+      const retry = await page.evaluate(() => ({
+        key: window.__myKeepMock.calls.filter((call) => call.method === "POST")[1].idempotencyKey,
+        timeoutsCleared: window.__myKeepMock.saveTimeouts.every((timeout) => timeout.cleared),
+      }));
+      assert.equal(retry.key, first.key);
+      assert.equal(retry.timeoutsCleared, true);
+    } finally {
+      await context.close();
+    }
   }
 });
 

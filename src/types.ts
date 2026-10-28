@@ -27,6 +27,7 @@ export interface NotePreview {
 }
 
 export interface Note extends NotePreview {
+  sync_version?: number;
   card_image: CardImageChoice;
   id: string;
   title: string;

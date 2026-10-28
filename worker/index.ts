@@ -1,11 +1,22 @@
 import { NOTE_COLORS } from "../src/types";
 import { handleBackupRestore } from "./restoreBackup";
 import { linkPreview } from "./linkPreview";
+import {
+  hashIdempotencyBytes,
+  hashIdempotencyPayload,
+  idempotencyMatches,
+  markIdempotencyCompleted,
+  parseIdempotencyKey,
+  readIdempotencyRecord,
+  reserveIdempotencyRecord,
+} from "./idempotency";
+import type { IdempotencyRecord } from "./idempotency";
 import type { Attachment, CardImageChoice, ChecklistItem, Note, NoteColor, NoteInput, NotePreview } from "../src/types";
 
 interface NoteRow extends NotePreview {
   card_image: CardImageChoice;
   id: string;
+  sync_version: number;
   title: string;
   body: string;
   url: string;
@@ -55,8 +66,9 @@ interface LabelGroupRow {
   name: string;
 }
 
-const SELECT_NOTE = "SELECT id, title, body, url, pinned, archived, color, deleted_at, created_at, updated_at, preview_title, preview_description, preview_image, preview_hostname, card_image FROM notes";
+const SELECT_NOTE = "SELECT notes.id, title, body, url, pinned, archived, color, deleted_at, created_at, updated_at, preview_title, preview_description, preview_image, preview_hostname, card_image, COALESCE(note_sync_versions.sync_version, 1) AS sync_version FROM notes LEFT JOIN note_sync_versions ON note_sync_versions.note_id = notes.id";
 const PAGE_SIZE = 50;
+const MAX_LIST_LIMIT = 500;
 const MAX_SEARCH_LENGTH = 200;
 const MAX_CHECKLIST_ITEMS = 500;
 const MAX_LABELS = 50;
@@ -352,31 +364,103 @@ async function dataRevision(env: Env): Promise<number> {
   return row.revision;
 }
 
+function parseNonNegativeInteger(value: string): number | null {
+  if (!/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function optionalRevision(value: string | null): number | null | undefined {
+  return value === null ? undefined : parseNonNegativeInteger(value);
+}
+
+function listWindow(params: URLSearchParams): { offset: number; limit: number } | null {
+  const offset = params.has("offset") ? parseNonNegativeInteger(params.get("offset")!) : 0;
+  const limit = params.has("limit") ? parseNonNegativeInteger(params.get("limit")!) : PAGE_SIZE;
+  if (offset === null || limit === null || limit < 1 || limit > MAX_LIST_LIMIT) return null;
+  return { offset, limit };
+}
+
+function listChangedResponse(): Response {
+  return json({ error: "一覧が更新されました。もう一度読み込んでください。", code: "list_changed" }, 409);
+}
+
 async function listNotes(request: Request, env: Env): Promise<Response> {
   const params = new URL(request.url).searchParams;
-  const offset = Number(params.get("offset") ?? "0");
+  const window = listWindow(params);
+  const expectedRevision = optionalRevision(params.get("revision"));
   const filter = noteListFilter(params);
-  if (!filter || !Number.isSafeInteger(offset) || offset < 0) {
+  // Full payloads stay at 50; only the lightweight check may return 500 IDs.
+  if (!filter || !window || window.limit > PAGE_SIZE || expectedRevision === null) {
     return json({ error: "一覧の指定が正しくありません。" }, 400);
   }
-  // Capture before reading: a concurrent mutation remains visible to the next check.
+  // The before/after revision barrier keeps a page and its relation data from
+  // being assembled across concurrent writes. Later pages can pin this value.
   const revision = await dataRevision(env);
+  if (expectedRevision !== undefined && expectedRevision !== revision) return listChangedResponse();
   const result = await env.DB.prepare(
     `${SELECT_NOTE} WHERE ${filter.where} ORDER BY ${filter.order} LIMIT ? OFFSET ?`,
-  ).bind(...filter.bindings, PAGE_SIZE + 1, offset).all<NoteRow>();
+  ).bind(...filter.bindings, window.limit + 1, window.offset).all<NoteRow>();
   const rows = result.results ?? [];
-  const page = rows.slice(0, PAGE_SIZE);
-  return json({ notes: await withRelations(page, env), hasMore: rows.length > PAGE_SIZE, revision });
+  const page = rows.slice(0, window.limit);
+  const notes = await withRelations(page, env);
+  if (await dataRevision(env) !== revision) return listChangedResponse();
+  return json({ notes, hasMore: rows.length > window.limit, revision });
 }
 
 async function checkNotes(request: Request, env: Env): Promise<Response> {
-  const filter = noteListFilter(new URL(request.url).searchParams);
-  if (!filter) return json({ error: "一覧の指定が正しくありません。" }, 400);
+  const params = new URL(request.url).searchParams;
+  const window = listWindow(params);
+  const expectedRevision = optionalRevision(params.get("revision"));
+  const since = optionalRevision(params.get("since"));
+  const filter = noteListFilter(params);
+  if (!filter || !window || expectedRevision === null || since === null) {
+    return json({ error: "一覧の指定が正しくありません。" }, 400);
+  }
   const revision = await dataRevision(env);
+  if (expectedRevision !== undefined && expectedRevision !== revision) return listChangedResponse();
+  if (since === revision) return json({ unchanged: true, revision });
   const result = await env.DB.prepare(
-    `SELECT id, updated_at FROM notes WHERE ${filter.where} ORDER BY ${filter.order} LIMIT ?`,
-  ).bind(...filter.bindings, PAGE_SIZE).all<Pick<NoteRow, "id" | "updated_at">>();
-  return json({ notes: result.results ?? [], revision });
+    `SELECT notes.id, notes.updated_at, COALESCE(note_sync_versions.sync_version, 1) AS sync_version
+     FROM notes LEFT JOIN note_sync_versions ON note_sync_versions.note_id = notes.id
+     WHERE ${filter.where} ORDER BY ${filter.order} LIMIT ? OFFSET ?`,
+  ).bind(...filter.bindings, window.limit + 1, window.offset).all<Pick<NoteRow, "id" | "updated_at" | "sync_version">>();
+  const rows = result.results ?? [];
+  if (await dataRevision(env) !== revision) return listChangedResponse();
+  return json({ notes: rows.slice(0, window.limit), hasMore: rows.length > window.limit, revision });
+}
+
+async function batchNotes(request: Request, env: Env): Promise<Response> {
+  const value = await readInput(request, 20_000);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return json({ error: "一覧の指定が正しくありません。" }, 400);
+  }
+  const input = value as Record<string, unknown>;
+  const ids = input.ids;
+  const revision = input.revision;
+  if (Object.keys(input).length !== 2 || !Array.isArray(ids) || ids.length > 50
+    || ids.some((id) => !isStrictUuid(id)) || new Set(ids).size !== ids.length
+    || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) {
+    return json({ error: "一覧の指定が正しくありません。" }, 400);
+  }
+  const noteIds = ids as string[];
+  const snapshotRevision = await dataRevision(env);
+  if (snapshotRevision !== revision) return listChangedResponse();
+
+  let notes: Note[] = [];
+  if (noteIds.length) {
+    const result = await env.DB.prepare(
+      `${SELECT_NOTE} WHERE notes.id IN (${noteIds.map(() => "?").join(",")}) ORDER BY notes.id`,
+    ).bind(...noteIds).all<NoteRow>();
+    const loaded = await withRelations(result.results ?? [], env);
+    const byId = new Map<string, Note>(loaded.map((note): [string, Note] => [note.id, note]));
+    notes = noteIds.flatMap((id) => {
+      const note = byId.get(id);
+      return note ? [note] : [];
+    });
+  }
+  if (await dataRevision(env) !== revision) return listChangedResponse();
+  return json({ notes, revision });
 }
 
 async function sidebarCounts(env: Env): Promise<Response> {
@@ -734,6 +818,122 @@ function relationStatements(noteId: string, input: NoteInput, env: Env, replace:
   return statements;
 }
 
+function idempotencyPendingPredicate(record: IdempotencyRecord, noteId?: string): { sql: string; bindings: unknown[] } {
+  let sql = "EXISTS (SELECT 1 FROM api_idempotency WHERE idempotency_key = ? AND scope = ? AND payload_hash = ? AND resource_id = ? AND state = 'pending')";
+  const bindings: unknown[] = [record.idempotency_key, record.scope, record.payload_hash, record.resource_id];
+  if (noteId !== undefined) {
+    sql += " AND EXISTS (SELECT 1 FROM notes WHERE id = ?)";
+    bindings.push(noteId);
+  }
+  return { sql, bindings };
+}
+
+function idempotentRelationStatements(
+  noteId: string,
+  input: NoteInput,
+  env: Env,
+  record: IdempotencyRecord,
+  existingLabelsOnly: boolean,
+): D1PreparedStatement[] {
+  const statements: D1PreparedStatement[] = [];
+  const pending = idempotencyPendingPredicate(record, noteId);
+  const valuesSource = (placeholders: string, columns: number) =>
+    "SELECT " + Array.from({ length: columns }, (_, index) => "column" + (index + 1)).join(",") +
+    " FROM (VALUES " + placeholders + ") WHERE " + pending.sql;
+
+  if (input.checklist !== undefined) {
+    for (let start = 0; start < input.checklist.length; start += 19) {
+      const values = input.checklist.slice(start, start + 19);
+      const placeholders = values.map(() => "(?, ?, ?, ?, ?)").join(",");
+      const bindings = values.flatMap((item, index) => [crypto.randomUUID(), noteId, start + index, item.text, Number(item.checked)]);
+      statements.push(env.DB.prepare(
+        "INSERT INTO checklist_items (id, note_id, position, text, checked) " + valuesSource(placeholders, 5),
+      ).bind(...bindings, ...pending.bindings));
+    }
+  }
+  if (input.labels !== undefined) {
+    for (let start = 0; start < input.labels.length; start += 40) {
+      const labels = input.labels.slice(start, start + 40);
+      const placeholders = labels.map(() => "(?, ?)").join(",");
+      const labelBindings = labels.flatMap((name) => [labelKey(name), name]);
+      if (!existingLabelsOnly) {
+        statements.push(env.DB.prepare(
+          "INSERT OR IGNORE INTO labels (name_key, name) " + valuesSource(placeholders, 2),
+        ).bind(...labelBindings, ...pending.bindings));
+      }
+      statements.push(env.DB.prepare(
+        "INSERT INTO note_labels (note_id, label_key) " + valuesSource(placeholders, 2),
+      ).bind(...labels.flatMap((name) => [noteId, labelKey(name)]), ...pending.bindings));
+    }
+  }
+  return statements;
+}
+
+function idempotentNoteInsertStatement(
+  record: IdempotencyRecord,
+  input: NoteInput,
+  env: Env,
+): D1PreparedStatement {
+  const pending = idempotencyPendingPredicate(record);
+  const values = [
+    record.resource_id, input.title, input.body, input.url, Number(input.pinned), Number(input.archived), input.color,
+    null, record.created_at, record.created_at, input.preview_title ?? "", input.preview_description ?? "",
+    input.preview_image ?? "", input.preview_hostname ?? "", input.card_image ?? "auto",
+  ];
+  return env.DB.prepare(
+    "INSERT INTO notes (id, title, body, url, pinned, archived, color, deleted_at, created_at, updated_at, preview_title, preview_description, preview_image, preview_hostname, card_image) " +
+    "SELECT " + values.map(() => "?").join(", ") + " WHERE " + pending.sql,
+  ).bind(...values, ...pending.bindings);
+}
+
+function idempotentAttachmentInsertStatement(
+  noteId: string,
+  attachmentId: string,
+  filename: string,
+  mime: string,
+  r2Key: string,
+  createdAt: string,
+  record: IdempotencyRecord,
+  env: Env,
+): D1PreparedStatement {
+  const pending = idempotencyPendingPredicate(record);
+  return env.DB.prepare(
+    "INSERT INTO attachments (id, note_id, filename, mime_type, r2_key, created_at) " +
+    "SELECT ?, ?, ?, ?, ?, ? WHERE " + pending.sql +
+    " AND EXISTS (SELECT 1 FROM notes WHERE id = ?) " +
+    "AND NOT EXISTS (SELECT 1 FROM note_deletions WHERE note_id = ?)",
+  ).bind(attachmentId, noteId, filename, mime, r2Key, createdAt, ...pending.bindings, noteId, noteId);
+}
+
+async function readNoteValue(id: string, env: Env): Promise<Note | null> {
+  const row = await env.DB.prepare(SELECT_NOTE + " WHERE id = ?").bind(id).first<NoteRow>();
+  if (!row) return null;
+  return (await withRelations([row], env))[0];
+}
+
+async function insertIdempotentNote(
+  input: NoteInput,
+  env: Env,
+  record: IdempotencyRecord,
+  existingLabelsOnly: boolean,
+  attachmentStatement?: D1PreparedStatement,
+): Promise<Note | null> {
+  const statements = [
+    idempotentNoteInsertStatement(record, input, env),
+    ...idempotentRelationStatements(record.resource_id, input, env, record, existingLabelsOnly),
+  ];
+  if (attachmentStatement) statements.push(attachmentStatement);
+  const completionCondition = attachmentStatement
+    ? "EXISTS (SELECT 1 FROM notes WHERE id = ?) AND EXISTS (SELECT 1 FROM attachments WHERE id = ? AND note_id = ?)"
+    : "EXISTS (SELECT 1 FROM notes WHERE id = ?)";
+  const completionBindings = attachmentStatement
+    ? [record.resource_id, record.secondary_resource_id, record.resource_id]
+    : [record.resource_id];
+  statements.push(markIdempotencyCompleted(env.DB, record, new Date().toISOString(), completionCondition, completionBindings));
+  await env.DB.batch(statements);
+  return readNoteValue(record.resource_id, env);
+}
+
 async function insertNote(input: NoteInput, env: Env, timestamps?: { created_at: string; updated_at: string }, deletedAt: string | null = null, existingLabelsOnly = false): Promise<Note> {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
@@ -749,11 +949,41 @@ async function insertNote(input: NoteInput, env: Env, timestamps?: { created_at:
   return (await withRelations([row!], env))[0];
 }
 
+async function replayIdempotentNote(record: IdempotencyRecord, env: Env): Promise<Response> {
+  const note = await readNoteValue(record.resource_id, env);
+  if (!note) return json({ error: "このキーで作成されたメモは削除済みです。新しい保存は行いませんでした。" }, 410);
+  return json({ note }, 201);
+}
+
 async function createNote(request: Request, env: Env): Promise<Response> {
-  const input = parseInput(await readInput(request));
+  const idempotencyKey = parseIdempotencyKey(request);
+  if (idempotencyKey === false) return json({ error: "Idempotency-Key は UUID で指定してください。" }, 400);
+  const value = await readInput(request);
+  const input = parseInput(value);
   if (!input) return json({ error: "メモの内容を確認してください。" }, 400);
   if (!await validCardImage(input, env)) return json({ error: "カード画像を確認してください。" }, 400);
-  return json({ note: await insertNote(input, env) }, 201);
+  if (idempotencyKey === null) return json({ note: await insertNote(input, env) }, 201);
+
+  const scope = "POST /api/notes";
+  const payloadHash = await hashIdempotencyPayload(value);
+  const record = await reserveIdempotencyRecord(env.DB, idempotencyKey, scope, payloadHash);
+  if (!idempotencyMatches(record, scope, payloadHash)) {
+    return json({ error: "この Idempotency-Key は別の保存内容に使われています。" }, 409);
+  }
+  if (record.state === "completed") return replayIdempotentNote(record, env);
+
+  try {
+    const note = await insertIdempotentNote(input, env, record, false);
+    const current = await readIdempotencyRecord(env.DB, record.idempotency_key);
+    if (current?.state === "completed") {
+      return note ? json({ note }, 201) : replayIdempotentNote(record, env);
+    }
+    return json({ error: "保存結果を確認できませんでした。もう一度お試しください。" }, 503);
+  } catch (error) {
+    const current = await readIdempotencyRecord(env.DB, record.idempotency_key);
+    if (current?.state === "completed") return replayIdempotentNote(record, env);
+    throw error;
+  }
 }
 
 async function getNote(id: string, env: Env): Promise<Response> {
@@ -939,9 +1169,51 @@ async function persistAttachment(noteId: string, filename: string, mime: string,
   return toAttachment({ id, note_id: noteId, filename, mime_type: mime, r2_key: key, created_at: createdAt });
 }
 
+async function readIdempotentAttachment(noteId: string, attachmentId: string, env: Env): Promise<AttachmentRow | null> {
+  return env.DB.prepare(
+    "SELECT id, note_id, filename, mime_type, r2_key, created_at FROM attachments WHERE id = ? AND note_id = ?",
+  ).bind(attachmentId, noteId).first<AttachmentRow>();
+}
+
+async function idempotentAttachmentParentState(noteId: string, env: Env): Promise<"active" | "missing" | "deleting"> {
+  const parent = await env.DB.prepare(
+    "SELECT n.id, d.note_id AS deletion_id FROM notes n LEFT JOIN note_deletions d ON d.note_id = n.id WHERE n.id = ?",
+  ).bind(noteId).first<{ id: string; deletion_id: string | null }>();
+  if (!parent) return "missing";
+  return parent.deletion_id ? "deleting" : "active";
+}
+
+async function cleanupIdempotentAttachmentObject(noteId: string, attachmentId: string, env: Env): Promise<void> {
+  if (await readIdempotentAttachment(noteId, attachmentId, env)) return;
+  const parentState = await idempotentAttachmentParentState(noteId, env);
+  if (parentState !== "active") await env.IMAGES.delete("notes/" + noteId + "/" + attachmentId);
+}
+
+async function cleanupCompletedIdempotentAttachmentObject(noteId: string, attachmentId: string, env: Env): Promise<void> {
+  // Completed reservations cannot insert this attachment again. A late R2 put
+  // from a concurrent retry must not resurrect an object whose row was deleted.
+  if (await readIdempotentAttachment(noteId, attachmentId, env)) return;
+  await env.IMAGES.delete("notes/" + noteId + "/" + attachmentId);
+}
+
+async function replayIdempotentAttachment(
+  record: IdempotencyRecord,
+  noteId: string,
+  env: Env,
+): Promise<Response> {
+  const row = await readIdempotentAttachment(noteId, record.resource_id, env);
+  if (row) return json({ attachment: toAttachment(row) }, 201);
+  await cleanupCompletedIdempotentAttachmentObject(noteId, record.resource_id, env);
+  return json({ error: "このキーで作成された添付画像は削除済みです。新しい保存は行いませんでした。" }, 410);
+}
+
 async function uploadAttachment(noteId: string, request: Request, env: Env): Promise<Response> {
-  const note = await env.DB.prepare("SELECT id FROM notes WHERE id = ?").bind(noteId).first();
-  if (!note) return json({ error: "メモが見つかりません。" }, 404);
+  const idempotencyKey = parseIdempotencyKey(request);
+  if (idempotencyKey === false) return json({ error: "Idempotency-Key は UUID で指定してください。" }, 400);
+  if (idempotencyKey === null) {
+    const note = await env.DB.prepare("SELECT id FROM notes WHERE id = ?").bind(noteId).first();
+    if (!note) return json({ error: "メモが見つかりません。" }, 404);
+  }
 
   const mime = request.headers.get("Content-Type")?.toLowerCase() ?? "";
   if (!MIME_TYPE_PATTERN.test(mime) || mime.length > 100) {
@@ -968,7 +1240,67 @@ async function uploadAttachment(noteId: string, request: Request, env: Env): Pro
     throw error;
   }
   if (!bytes.length) return json({ error: "添付ファイルが空です。" }, 400);
-  return json({ attachment: await persistAttachment(noteId, filename, mime, bytes, env) }, 201);
+  if (idempotencyKey === null) {
+    return json({ attachment: await persistAttachment(noteId, filename, mime, bytes, env) }, 201);
+  }
+
+  const scope = "POST /api/notes/" + noteId + "/attachments";
+  const payloadHash = await hashIdempotencyPayload({
+    note_id: noteId,
+    filename,
+    mime_type: mime,
+    bytes_hash: await hashIdempotencyBytes(bytes),
+  });
+  const record = await reserveIdempotencyRecord(env.DB, idempotencyKey, scope, payloadHash);
+  if (!idempotencyMatches(record, scope, payloadHash)) {
+    return json({ error: "この Idempotency-Key は別の保存内容に使われています。" }, 409);
+  }
+  if (record.state === "completed") return replayIdempotentAttachment(record, noteId, env);
+
+  const parentState = await idempotentAttachmentParentState(noteId, env);
+  if (parentState !== "active") {
+    await cleanupIdempotentAttachmentObject(noteId, record.resource_id, env);
+    return parentState === "missing"
+      ? json({ error: "メモが見つかりません。" }, 404)
+      : json({ error: "メモの完全削除が処理中です。" }, 409);
+  }
+
+  const r2Key = "notes/" + noteId + "/" + record.resource_id;
+  await env.IMAGES.put(r2Key, bytes, { httpMetadata: { contentType: mime } });
+  try {
+    await env.DB.batch([
+      idempotentAttachmentInsertStatement(noteId, record.resource_id, filename, mime, r2Key, record.created_at, record, env),
+      markIdempotencyCompleted(
+        env.DB,
+        record,
+        new Date().toISOString(),
+        "EXISTS (SELECT 1 FROM attachments WHERE id = ? AND note_id = ?)",
+        [record.resource_id, noteId],
+      ),
+    ]);
+  } catch (error) {
+    const current = await readIdempotencyRecord(env.DB, record.idempotency_key);
+    if (current?.state === "completed") return replayIdempotentAttachment(record, noteId, env);
+    const latestParentState = await idempotentAttachmentParentState(noteId, env);
+    if (latestParentState !== "active") {
+      await cleanupIdempotentAttachmentObject(noteId, record.resource_id, env);
+      return latestParentState === "missing"
+        ? json({ error: "メモが見つかりません。" }, 404)
+        : json({ error: "メモの完全削除が処理中です。" }, 409);
+    }
+    throw error;
+  }
+
+  const current = await readIdempotencyRecord(env.DB, record.idempotency_key);
+  if (current?.state === "completed") return replayIdempotentAttachment(record, noteId, env);
+  const latestParentState = await idempotentAttachmentParentState(noteId, env);
+  if (latestParentState !== "active") {
+    await cleanupIdempotentAttachmentObject(noteId, record.resource_id, env);
+    return latestParentState === "missing"
+      ? json({ error: "メモが見つかりません。" }, 404)
+      : json({ error: "メモの完全削除が処理中です。" }, 409);
+  }
+  return json({ error: "添付画像の保存結果を確認できませんでした。もう一度お試しください。" }, 503);
 }
 
 function missingPreviewSql(): string {
@@ -1160,7 +1492,27 @@ function capturePreview(form: FormData, url: string): NotePreview {
   return preview;
 }
 
+async function captureLabelsExist(input: NoteInput, env: Env): Promise<boolean> {
+  if (!input.labels?.length) return true;
+  const keys = input.labels.map(labelKey);
+  const result = await env.DB.prepare(
+    "SELECT name_key FROM labels WHERE name_key IN (" + keys.map(() => "?").join(",") + ")",
+  ).bind(...keys).all<{ name_key: string }>();
+  return (result.results ?? []).length === keys.length;
+}
+
+async function replayIdempotentCapture(record: IdempotencyRecord, env: Env): Promise<Response> {
+  if (record.secondary_resource_id) {
+    await cleanupCompletedIdempotentAttachmentObject(record.resource_id, record.secondary_resource_id, env);
+  }
+  const note = await readNoteValue(record.resource_id, env);
+  if (note) return json({ note }, 201);
+  return replayIdempotentNote(record, env);
+}
+
 async function captureNote(request: Request, env: Env): Promise<Response> {
+  const idempotencyKey = parseIdempotencyKey(request);
+  if (idempotencyKey === false) return json({ error: "Idempotency-Key は UUID で指定してください。" }, 400);
   const contentType = request.headers.get("Content-Type") ?? "";
   const mediaType = contentType.split(";", 1)[0].trim().toLowerCase();
   if (mediaType !== "multipart/form-data" && mediaType !== "application/x-www-form-urlencoded") {
@@ -1200,13 +1552,6 @@ async function captureNote(request: Request, env: Env): Promise<Response> {
   const input = parseInput({ title, url, body, pinned: pinned === "true", archived: false, color: "default", labels });
   if (!input) return json({ error: "ラベルを確認してください。" }, 400);
   Object.assign(input, capturePreview(form, url));
-  if (input.labels?.length) {
-    const keys = input.labels.map(labelKey);
-    const result = await env.DB.prepare(`SELECT name_key FROM labels WHERE name_key IN (${keys.map(() => "?").join(",")})`)
-      .bind(...keys).all<{ name_key: string }>();
-    if ((result.results ?? []).length !== keys.length) return json({ error: "登録済みのラベルだけを選択してください。" }, 400);
-  }
-
   const images = form.getAll("image");
   if (images.length > 1) return json({ error: "画像は1枚だけ選んでください。" }, 400);
   const image = images[0];
@@ -1224,16 +1569,77 @@ async function captureNote(request: Request, env: Env): Promise<Response> {
     imageBytes = new Uint8Array(await image.arrayBuffer());
   }
 
-  const note = await insertNote(input, env, undefined, null, true);
-  if (imageBytes) {
-    try {
-      note.attachments.push(await persistAttachment(note.id, filename, mime, imageBytes, env));
-    } catch (error) {
-      await env.DB.prepare("DELETE FROM notes WHERE id = ?").bind(note.id).run();
-      throw error;
+  if (idempotencyKey === null) {
+    if (!await captureLabelsExist(input, env)) return json({ error: "登録済みのラベルだけを選択してください。" }, 400);
+    const note = await insertNote(input, env, undefined, null, true);
+    if (imageBytes) {
+      try {
+        note.attachments.push(await persistAttachment(note.id, filename, mime, imageBytes, env));
+      } catch (error) {
+        await env.DB.prepare("DELETE FROM notes WHERE id = ?").bind(note.id).run();
+        throw error;
+      }
     }
+    return json({ note }, 201);
   }
-  return json({ note }, 201);
+
+  const scope = "POST /api/capture";
+  const payloadHash = await hashIdempotencyPayload({
+    note: input,
+    image: imageBytes
+      ? { filename, mime_type: mime, bytes_hash: await hashIdempotencyBytes(imageBytes) }
+      : null,
+  });
+  const knownRecord = await readIdempotencyRecord(env.DB, idempotencyKey);
+  if (knownRecord && !idempotencyMatches(knownRecord, scope, payloadHash)) {
+    return json({ error: "この Idempotency-Key は別の保存内容に使われています。" }, 409);
+  }
+  if (knownRecord?.state === "completed") return replayIdempotentCapture(knownRecord, env);
+  if (!await captureLabelsExist(input, env)) return json({ error: "登録済みのラベルだけを選択してください。" }, 400);
+
+  const record = knownRecord ?? await reserveIdempotencyRecord(
+    env.DB,
+    idempotencyKey,
+    scope,
+    payloadHash,
+    imageBytes ? crypto.randomUUID() : null,
+  );
+  if (!idempotencyMatches(record, scope, payloadHash)) {
+    return json({ error: "この Idempotency-Key は別の保存内容に使われています。" }, 409);
+  }
+  if (record.state === "completed") return replayIdempotentCapture(record, env);
+  if (Boolean(imageBytes) !== Boolean(record.secondary_resource_id)) {
+    return json({ error: "この Idempotency-Key の保存内容を確認できません。" }, 409);
+  }
+
+  let attachmentStatement: D1PreparedStatement | undefined;
+  if (imageBytes && record.secondary_resource_id) {
+    const r2Key = "notes/" + record.resource_id + "/" + record.secondary_resource_id;
+    await env.IMAGES.put(r2Key, imageBytes, { httpMetadata: { contentType: mime } });
+    attachmentStatement = idempotentAttachmentInsertStatement(
+      record.resource_id,
+      record.secondary_resource_id,
+      filename,
+      mime,
+      r2Key,
+      record.created_at,
+      record,
+      env,
+    );
+  }
+
+  try {
+    await insertIdempotentNote(input, env, record, true, attachmentStatement);
+    const current = await readIdempotencyRecord(env.DB, record.idempotency_key);
+    if (current?.state === "completed") {
+      return replayIdempotentCapture(record, env);
+    }
+    return json({ error: "保存結果を確認できませんでした。もう一度お試しください。" }, 503);
+  } catch (error) {
+    const current = await readIdempotencyRecord(env.DB, record.idempotency_key);
+    if (current?.state === "completed") return replayIdempotentCapture(record, env);
+    throw error;
+  }
 }
 
 async function getAttachment(noteId: string, attachmentId: string, env: Env): Promise<Response> {
@@ -1312,6 +1718,10 @@ export default {
 
       if (url.pathname === "/api/notes/check" && request.method === "GET") {
         return await checkNotes(request, env);
+      }
+
+      if (url.pathname === "/api/notes/batch" && request.method === "POST") {
+        return await batchNotes(request, env);
       }
 
       if (url.pathname === "/api/notes") {

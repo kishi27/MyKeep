@@ -186,7 +186,11 @@ Names are checked for duplicates after trimming surrounding spaces and applying 
 
 ## Chrome extension
 
-**MyKeep Capture v0.3.7** supports Chrome Manifest V3 and Chrome 120 or later. The label selector displays labels by group.
+**MyKeep Capture v0.3.8** supports Chrome Manifest V3 and Chrome 120 or later. The label selector displays labels by group.
+
+New web notes, image uploads, and extension captures reuse an operation ID when retrying unchanged input in the same open editor or popup. A lost response therefore does not create another copy. Deliberately creating another note or choosing to save a duplicate remains supported. Reads time out after 30 seconds and saves after 60 seconds, keeping input for retry. Closing or reloading the screen clears the operation ID; check whether the save succeeded before starting again.
+
+If an R2 image write succeeds but its D1 registration fails, retrying the same operation recovers it. Abandoning the retry may leave an unlinked image in R2. Failed requests do not unconditionally delete shared objects, which could otherwise remove an image saved by a concurrent retry.
 
 ### Install and configure
 
@@ -267,7 +271,7 @@ Open ``chrome://extensions`` → MyKeep Capture → “Details” → “Extensi
 5. When the run finishes, select “Retry failed” if needed. Access denials, timeouts, and pages without images remain failures; processing continues for other notes.
 6. Select “Clear results” when you no longer need the history. You cannot clear while processing. If paused, select “Cancel” before clearing.
 
-After repair, select “↻” in MyKeep to refresh the list and check the thumbnails. Repair does not update note timestamps, so the lightweight automatic refresh may not detect the changes. Login requirements and site restrictions can prevent an image from being fetched, even on retry.
+After repair, select “↻” in MyKeep to refresh the list and check the thumbnails. Repair does not update note timestamps, but change versions also let automatic refresh detect it. Login requirements and site restrictions can prevent an image from being fetched, even on retry.
 
 The extension processes one tab at a time instead of opening many tabs. It is designed for 1,000 or more notes, using 50-note cursor pages and saving progress in ``chrome.storage.local`` so work can resume. Progress is stored locally in the Chrome profile and is not synced to Google servers.
 
@@ -295,7 +299,7 @@ If an attachment cannot be fetched, Export continues when possible and sets that
 
 Do not change data from another tab or device while Export is running. Changes to content, labels, or attachments during retrieval abort the backup and ask you to retry, even if counts stay the same. Export also waits until pending permanent deletion finishes. Unused labels and empty groups are included. Re-importing this ZIP into Google Keep is not guaranteed.
 
-Permanent deletion records the note and attachment keys in D1 before deleting R2 objects, then removes the note after success. Restore is rejected once deletion starts. Interrupted deletion remains recorded and is retried by another delete operation or the next daily cleanup. Label rename/deletion also updates affected notes' timestamps, so an older editor on another device cannot silently restore outdated labels. Automatic refresh checks the first 50 notes plus one revision number to detect attachment, label, and later-page changes.
+Permanent deletion records the note and attachment keys in D1 before deleting R2 objects, then removes the note after success. Restore is rejected once deletion starts. Interrupted deletion remains recorded and is retried by another delete operation or the next daily cleanup. Label rename/deletion also updates affected notes' timestamps, so an older editor on another device cannot silently restore outdated labels. Automatic refresh checks one revision number first. When it changes, MyKeep fetches IDs, timestamps, and versions for the loaded range in batches, then downloads full details only for changed notes. Concurrent changes trigger a fresh read instead of mixing pages; if changes continue, the current list stays visible with a retry message.
 
 Settings shows this browser's last completed Export date, note count and failed attachment count. Direct saves are marked as ZIP file write completed; ordinary downloads as ZIP generated; download started. Failed attachments are flagged as an incomplete backup. Export failures and cancelled save dialogs do not update the record. The record cannot confirm download completion or whether the file still exists, so also check the save location.
 

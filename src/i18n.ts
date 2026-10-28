@@ -9,6 +9,8 @@ export function savedLanguage(): Language {
 
 // Japanese keys also serve as the original text for messages kept in component state.
 const english = {
+  "通信に時間がかかっています。保存済みの場合もあるため、入力内容を残したまま再試行してください。": "The request timed out. It may already have been saved. Keep your input and try again.",
+  "一覧が更新されました。もう一度読み込んでください。": "Notes changed while loading. Please refresh again.",
   "日付絞り込み": "Date filters", "名前変更": "Rename", "新しい条件名": "New search name",
   "条件の名前を変更しました。": "Search renamed.",
   "日付絞り込み・保存した条件": "Date filters and saved searches",

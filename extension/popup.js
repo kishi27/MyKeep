@@ -31,6 +31,7 @@ const duplicateConfirm = document.getElementById("duplicateConfirm");
 const confirmAdd = document.getElementById("confirmAdd");
 const cancelAdd = document.getElementById("cancelAdd");
 const DUPLICATE_CHECK_TIMEOUT_MS = 8000;
+const CAPTURE_SAVE_TIMEOUT_MS = 60_000;
 let selectedImage = null;
 let previewUrl = null;
 let availableLabels = [];
@@ -50,10 +51,12 @@ let duplicateHasMore = false;
 let duplicateSavedWithoutId = false;
 let duplicateEndpoint = "";
 let duplicateConfirmationOpen = false;
+let duplicateConfirmationStarted = false;
 let duplicateCheckToken = 0;
 let duplicateCheckController = null;
 let duplicateCheckTimeoutId = null;
 let isSaving = false;
+let captureOperation = null;
 
 function renderStatus() {
   status.textContent = !statusMessage ? "" : statusIsError
@@ -223,6 +226,7 @@ function bypassDuplicateCheck() {
   if (!invalidateDuplicateCheck("skipped")) return;
   if (hasDuplicateMatches()) {
     duplicateConfirmationOpen = true;
+    duplicateConfirmationStarted = false;
     renderDuplicatePanel();
     setSaveEnabled();
     confirmAdd.focus();
@@ -263,6 +267,29 @@ function setSaveEnabled() {
 
 function limitText(value, maxLength) {
   return typeof value === "string" ? value.slice(0, maxLength) : "";
+}
+
+function createCaptureOperationId() {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function captureOperationIdFor(data) {
+  const payload = JSON.stringify(Array.from(data.entries(), ([key, value]) => typeof value === "string"
+    ? [key, "text", value]
+    : [key, "file", value.name, value.type, value.size, value.lastModified]));
+  if (!captureOperation || captureOperation.payload !== payload || captureOperation.image !== selectedImage) {
+    captureOperation = {
+      id: createCaptureOperationId(),
+      payload,
+      image: selectedImage,
+    };
+  }
+  return captureOperation.id;
 }
 
 function previewText(value, maxLength) {
@@ -664,6 +691,8 @@ async function saveCapture() {
   setSaveEnabled();
   hideSavedNoteLink();
   showStatus("popup.saving");
+  let saveTimeoutId = null;
+  let saveTimedOut = false;
   try {
     const settings = await chrome.storage.local.get(["apiUrl", "apiKey"]);
     if (!settings.apiUrl || !settings.apiKey) throw new Error("popup.error.apiKeyRequired");
@@ -684,19 +713,41 @@ async function saveCapture() {
     data.set("preview_image", previewImageUrl(pagePreview.image));
     data.set("preview_hostname", pageHostname(url.value));
     if (selectedImage) data.set("image", selectedImage, selectedImage.name || "pasted.png");
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${settings.apiKey}` },
-      body: data,
-      credentials: "omit",
-      redirect: "error",
+
+    const operationId = captureOperationIdFor(data);
+    const controller = new AbortController();
+    let rejectTimeout;
+    const timeoutPromise = new Promise((resolve, reject) => {
+      rejectTimeout = reject;
     });
-    let result = null;
-    try {
-      result = await response.json();
-    } catch {
-      result = null;
-    }
+    saveTimeoutId = setTimeout(() => {
+      saveTimedOut = true;
+      controller.abort();
+      rejectTimeout(new Error("popup.error.saveTimedOut"));
+    }, CAPTURE_SAVE_TIMEOUT_MS);
+
+    const requestPromise = (async () => {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${settings.apiKey}`,
+          "Idempotency-Key": operationId,
+        },
+        body: data,
+        credentials: "omit",
+        redirect: "error",
+        signal: controller.signal,
+      });
+      let result = null;
+      try {
+        result = await response.json();
+      } catch {
+        if (saveTimedOut) throw new Error("popup.error.saveTimedOut");
+      }
+      return { response, result };
+    })();
+    const { response, result } = await Promise.race([requestPromise, timeoutPromise]);
+    if (saveTimedOut) throw new Error("popup.error.saveTimedOut");
     if (!response.ok) throw new Error(result?.error || "popup.error.saveFailed");
     body.value = "";
     clearImage();
@@ -723,11 +774,15 @@ async function saveCapture() {
     }
     duplicateCheckState = "ready";
     duplicateConfirmationOpen = false;
+    duplicateConfirmationStarted = false;
     renderDuplicatePanel();
     showStatus("popup.saved");
+    captureOperation = null;
   } catch (error) {
-    showStatus(error instanceof Error ? error.message : "popup.error.sendFailed", true);
+    showStatus(saveTimedOut ? "popup.error.saveTimedOut"
+      : error instanceof Error ? error.message : "popup.error.sendFailed", true);
   } finally {
+    if (saveTimeoutId !== null) clearTimeout(saveTimeoutId);
     isSaving = false;
     setSaveEnabled();
   }
@@ -738,6 +793,7 @@ form.addEventListener("submit", (event) => {
   if (duplicateConfirmationOpen || save.disabled || isSaving || duplicateCheckState === "checking") return;
   if (hasDuplicateMatches()) {
     duplicateConfirmationOpen = true;
+    duplicateConfirmationStarted = false;
     renderDuplicatePanel();
     setSaveEnabled();
     confirmAdd.focus();
@@ -748,11 +804,16 @@ form.addEventListener("submit", (event) => {
 
 confirmAdd.addEventListener("click", () => {
   if (!duplicateConfirmationOpen || isSaving) return;
+  if (!duplicateConfirmationStarted) {
+    captureOperation = null;
+    duplicateConfirmationStarted = true;
+  }
   void saveCapture();
 });
 cancelAdd.addEventListener("click", () => {
   if (isSaving) return;
   duplicateConfirmationOpen = false;
+  duplicateConfirmationStarted = false;
   renderDuplicatePanel();
   setSaveEnabled();
   save.focus();

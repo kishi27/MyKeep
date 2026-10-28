@@ -10,6 +10,8 @@ import type { DateRange, ListCriteria, NoteSort, View } from "./listFilters";
 import { PinGate, PinSettings } from "./MobilePinLock";
 import { pinSnapshot } from "./pinLock";
 import { api } from "./api";
+import { listChanged, syncNoteList } from "./listSync";
+import type { NoteList, NoteCheck } from "./listSync";
 import { UnsavedChangesProvider, useUnsavedChanges } from "./UnsavedChanges";
 import { canRetryLinkPreview, displayLinkTitle, getLinkPreview, mergeLinkPreview } from "./linkPreview";
 import type { LinkPreview } from "./linkPreview";
@@ -19,8 +21,6 @@ import { NOTE_COLORS } from "./types";
 import type { Attachment, ChecklistInput, Note, NoteColor, NoteInput } from "./types";
 
 type NoteDates = Pick<Note, "created_at" | "updated_at">;
-type NoteList = { notes: Note[]; hasMore: boolean; revision: number };
-type NoteCheck = { notes: Pick<Note, "id" | "updated_at">[]; revision: number };
 type SidebarCounts = { views: Record<View, number>; labels: Record<string, number> };
 type ImportCounts = { done: number; total: number; success: number; failed: number; skipped: number };
 type ImportProgress = { notes: ImportCounts & { trashed: number }; attachments: ImportCounts };
@@ -294,12 +294,6 @@ function formatTimestamp(value: string, formatter: Intl.DateTimeFormat): string 
   return Number.isNaN(date.getTime()) ? "" : formatter.format(date);
 }
 
-function firstPageChanged(current: Note[], next: NoteCheck): boolean {
-  const first = current.slice(0, 50);
-  return first.length !== next.notes.length
-    || first.some((note, index) => note.id !== next.notes[index].id || note.updated_at !== next.notes[index].updated_at);
-}
-
 function listParams(view: View, search: string, label: string, sort: NoteSort, dates: DateRange): URLSearchParams {
   const params = new URLSearchParams({ view, sort });
   if (search.trim()) params.set("q", search.trim());
@@ -454,6 +448,7 @@ function MyKeep() {
   const [draft, setDraft] = useState<NoteDraft | null>(null);
   const editorBaselineRef = useRef("");
   const editorVersionRef = useRef<string | null>(null);
+  const createAttemptRef = useRef<{ body: string; key: string } | null>(null);
   const [selectedLabels, setSelectedLabels] = useState<string[]>([]);
   const [labelMenuOpen, setLabelMenuOpen] = useState(false);
   const [creatingLabel, setCreatingLabel] = useState(false);
@@ -665,21 +660,16 @@ function MyKeep() {
       setNotes([]);
       setHasMore(false);
     }
-    setError("");
+    // A background list refresh must not erase the editor's upload/retry error.
+    if (!draft) setError("");
     async function refresh() {
       try {
-        const collected: Note[] = [];
-        let more = false;
-        let fetchedPages = 0;
-        let revision: number | null = null;
-        for (let page = 0; page < pages; page++) {
-          const data = await api<NoteList>(listPath(view, search, labelFilter, page * 50, sortOrder, dateRange), { signal: controller.signal });
-          if (page === 0) revision = data.revision;
-          collected.push(...data.notes);
-          fetchedPages++;
-          more = data.hasMore && data.notes.length > 0;
-          if (!more) break;
-        }
+        const data = await syncNoteList(listParams(view, search, labelFilter, sortOrder, dateRange),
+          changedFilter ? [] : notesRef.current, pages * 50, controller.signal);
+        const collected = data.notes;
+        const more = data.hasMore;
+        const revision = data.revision;
+        const fetchedPages = Math.max(1, Math.ceil(collected.length / 50));
         if (!controller.signal.aborted) {
           const orderChanged = notesRef.current.some((note, index) =>
             note.id !== collected[index]?.id || note.pinned !== collected[index]?.pinned);
@@ -744,10 +734,12 @@ function MyKeep() {
       const controller = new AbortController();
       checkControllerRef.current = controller;
       try {
-        const data = await api<NoteCheck>(`/api/notes/check?${listParams(view, search, labelFilter, sortOrder, dateRange)}`, { signal: controller.signal });
+        const query = listParams(view, search, labelFilter, sortOrder, dateRange);
+        if (revisionRef.current !== null) query.set("since", String(revisionRef.current));
+        const data = await api<NoteCheck>(`/api/notes/check?${query}`, { signal: controller.signal });
         const revisionChanged = revisionRef.current !== null && data.revision !== revisionRef.current;
         if (active && !controller.signal.aborted && !refreshingRef.current && !loadingMoreRef.current
-          && !bulkWorkingRef.current && (revisionChanged || firstPageChanged(notesRef.current, data))) reloadList();
+          && !bulkWorkingRef.current && !data.unchanged && revisionChanged) reloadList();
       } catch { /* 自動確認の失敗は表示中の一覧に影響させない。 */ }
       finally {
         checking = false;
@@ -927,6 +919,7 @@ function MyKeep() {
   }
 
   function closeEditor() {
+    createAttemptRef.current = null;
     setViewerImageId(null);
     setEditorPreviewImage("");
     setEditorDates(null);
@@ -945,6 +938,7 @@ function MyKeep() {
   }
 
   function openEditor(note?: Note) {
+    createAttemptRef.current = null;
     setReadingNote(null);
     setViewerImageId(null);
     setError("");
@@ -1242,8 +1236,12 @@ function MyKeep() {
     setLoadingMore(true);
     setMoreError("");
     try {
-      const data = await api<NoteList>(listPath(view, search, labelFilter, offset, sortOrder, dateRange), { signal: controller.signal });
+      const query = listParams(view, search, labelFilter, sortOrder, dateRange);
+      query.set("offset", String(offset));
+      if (revisionRef.current !== null) query.set("revision", String(revisionRef.current));
+      const data = await api<NoteList>(`/api/notes?${query}`, { signal: controller.signal });
       if (controller.signal.aborted || generation !== listGenerationRef.current) return;
+      if (revisionRef.current !== null && data.revision !== revisionRef.current) { reloadList(); return; }
       const ids = new Set(notesRef.current.map((note) => note.id));
       const added = data.notes.filter((note) => !ids.has(note.id));
       notesRef.current = [...notesRef.current, ...added];
@@ -1253,6 +1251,7 @@ function MyKeep() {
       setHasMore(hasMoreRef.current);
     } catch (cause) {
       if (!controller.signal.aborted && generation === listGenerationRef.current) {
+        if (listChanged(cause)) { reloadList(); return; }
         pageLoadFailedRef.current = true;
         setMoreError(cause instanceof Error ? cause.message : "読み込みに失敗しました。");
       }
@@ -1276,9 +1275,13 @@ function MyKeep() {
         && !draft.checklist.some((item) => item.text.trim()) && images.length
         ? images[0].file.name.replace(/\.[^.]+$/, "") || "画像メモ" : draft.title;
       const input = { ...draft, title, labels: selectedLabels };
+      const body = JSON.stringify(input);
+      if (!editingId && createAttemptRef.current?.body !== body) {
+        createAttemptRef.current = { body, key: crypto.randomUUID() };
+      }
       const { note } = editingId
         ? await api<{ note: Note }>(`/api/notes/${editingId}`, { method: "PATCH", body: JSON.stringify({ ...input, expected_updated_at: editorVersionRef.current }) })
-        : await api<{ note: Note }>("/api/notes", { method: "POST", body: JSON.stringify(input) });
+        : await api<{ note: Note }>("/api/notes", { method: "POST", body, headers: { "Idempotency-Key": createAttemptRef.current!.key } });
       setDraft((current) => current ? { ...current, card_image: note.card_image } : current);
       setEditorPreviewImage(note.preview_image);
       editorVersionRef.current = note.updated_at;
@@ -1293,7 +1296,7 @@ function MyKeep() {
         try {
           const { attachment } = await api<{ attachment: Attachment }>(`/api/notes/${note.id}/attachments`, {
             method: "POST", body: image.file,
-            headers: { "Content-Type": image.file.type, "X-File-Name": encodeURIComponent(image.file.name) },
+            headers: { "Content-Type": image.file.type, "X-File-Name": encodeURIComponent(image.file.name), "Idempotency-Key": image.id },
           });
           setEditorAttachments((current) => [...current, attachment]);
           URL.revokeObjectURL(image.previewUrl);
