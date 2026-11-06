@@ -1,5 +1,6 @@
 // Small, resumable batches: never build a ZIP or buffer attachment bodies in a Worker.
 const DAY = 86_400_000;
+const RETENTION_DAYS = 3;
 const STATE_KEY = "progress.json";
 const LEASE_MS = 16 * 60_000; // Longer than the 15-minute Cron invocation limit.
 const TABLES = ["notes", "attachments", "checklist_items", "labels", "label_groups", "note_labels"] as const;
@@ -123,7 +124,7 @@ async function copyFiles(env: BackupEnv, state: Progress): Promise<boolean> {
 async function pruneOldCopies(bucket: R2Bucket, state: Progress): Promise<void> {
   const latest = (await jsonObject<Latest>(bucket, "latest.json"))?.value;
   if (latest && !snapshotPattern.test(latest.snapshot)) throw new Error("backup_invalid_latest");
-  const cutoff = new Date(Date.parse(`${state.day}T00:00:00Z`) - 6 * DAY).toISOString().slice(0, 10);
+  const cutoff = new Date(Date.parse(`${state.day}T00:00:00Z`) - (RETENTION_DAYS - 1) * DAY).toISOString().slice(0, 10);
   // Date-prefixed keys sort oldest first. Only this feature's namespace is eligible.
   const page = await bucket.list({ prefix: "daily/", limit: 100, cursor: state.cleanupCursor });
   let expired = page.objects.filter(o => {

@@ -247,17 +247,27 @@ test('scheduled backups preserve data, resume safely, and gate automatic deletio
     assert.equal((await (await BACKUPS.get('latest.json')).json()).snapshot, done.snapshot);
     await IMAGES.put(`notes/original/${attachmentIds[0]}`, bytes, { httpMetadata: { contentType: 'image/png' } });
   });
-  await t.test('7-day cleanup is scoped to backups and preserves latest and unrelated objects', async () => {
+  await t.test('3-day cleanup preserves today and two preceding days, latest and unrelated objects', async () => {
     await BACKUPS.delete('progress.json');
     done = await runToDone();
     const old = `2000-01-01-${crypto.randomUUID()}`;
     await BACKUPS.put(`daily/${old}/manifest.json`, '{}');
     await BACKUPS.put(`daily/${old}/files/${crypto.randomUUID()}`, bytes);
     await BACKUPS.put('unrelated/keep', bytes);
+    const boundaryKeys = [];
+    for (const daysAgo of [1, 2, 3]) {
+      const date = new Date(Date.parse(`${done.day}T00:00:00Z`) - daysAgo * day).toISOString().slice(0, 10);
+      const key = `daily/${date}-${crypto.randomUUID()}/manifest.json`;
+      boundaryKeys.push(key);
+      await BACKUPS.put(key, '{}');
+    }
     await advanceScheduledBackup(env, now + 60 * 60_000);
     assert.equal(await BACKUPS.head(`daily/${old}/manifest.json`), null);
     assert.ok(await BACKUPS.head(`daily/${done.snapshot}/manifest.json`));
     assert.ok(await BACKUPS.head('unrelated/keep'));
+    assert.ok(await BACKUPS.head(boundaryKeys[0]));
+    assert.ok(await BACKUPS.head(boundaryKeys[1]));
+    assert.equal(await BACKUPS.head(boundaryKeys[2]), null);
   });
   await t.test('exhausted backups prune expired partials beyond a protected listing page, even without any success', async () => {
     const savedLatest = await (await BACKUPS.get('latest.json')).text();
