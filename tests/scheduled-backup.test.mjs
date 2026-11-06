@@ -1,0 +1,229 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { readFile, readdir, writeFile, unlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { build } from 'esbuild';
+import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
+import { runDownload } from '../scripts/download-backup.mjs';
+
+async function load(path) {
+  const b = await build({ entryPoints: [path], bundle: true, write: false, format: 'esm', platform: 'node', target: 'node24' });
+  return import(`data:text/javascript;base64,${Buffer.from(b.outputFiles[0].text).toString('base64')}`);
+}
+const { advanceScheduledBackup: advanceInNode, hasRecentBackup } = await load('worker/scheduledBackup.ts');
+const { default: worker } = await load('worker/index.ts');
+const { readBackupZip } = await load('src/restoreBackup.ts');
+const day = 86_400_000;
+const bytes = new Uint8Array([10, 20, 30, 40]);
+
+test('scheduled backups preserve data, resume safely, and gate automatic deletion', async t => {
+  // Exercise R2-to-R2 streaming inside workerd: a Node RPC proxy loses the stream's known length.
+  const bundled = await build({ stdin: { resolveDir: process.cwd(), contents: `
+    import { advanceScheduledBackup } from './worker/scheduledBackup.ts';
+    export default { async fetch(request, env) {
+      await advanceScheduledBackup(env, Number(new URL(request.url).searchParams.get('now')));
+      return new Response('ok');
+    }};` }, bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022' });
+  const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{ name: 'backup-test', modules: true,
+    script: bundled.outputFiles[0].text, compatibilityDate: '2026-09-28',
+    bindings: { AUTOMATIC_BACKUP_ENABLED: 'true' },
+    d1Databases: ['DB'], r2Buckets: ['IMAGES', 'BACKUPS'] }] }));
+  t.after(() => mf.dispose());
+  const DB = await mf.getD1Database('DB');
+  const IMAGES = await mf.getR2Bucket('IMAGES');
+  const BACKUPS = await mf.getR2Bucket('BACKUPS');
+  const env = { DB, IMAGES, BACKUPS, AUTOMATIC_BACKUP_ENABLED: 'true' };
+  const advanceScheduledBackup = async (bindings, at) => {
+    if (bindings.AUTOMATIC_BACKUP_ENABLED !== 'true') return advanceInNode(bindings, at);
+    const response = await mf.dispatchFetch(`http://local.test/?now=${at}`);
+    assert.equal(response.status, 200, await response.text());
+  };
+  for (const file of (await readdir('migrations')).filter(f => f.endsWith('.sql')).sort()) {
+    await DB.exec((await readFile(`migrations/${file}`, 'utf8')).replace(/--[^\n]*/g, '').replace(/\r?\n/g, ' '));
+  }
+  const now = Date.now();
+  const progress = async () => (await BACKUPS.get('progress.json'))?.json();
+  async function runToDone(start = now, bindings = env) {
+    for (let tick = 0; tick < 250; tick++) {
+      await advanceScheduledBackup(bindings, start + tick * 60_000);
+      const p = await progress();
+      if (p.phase === 'complete') return p;
+      assert.notEqual(p.phase, 'failed', JSON.stringify(p));
+    }
+    assert.fail('backup failed to finish within bounded invocations');
+  }
+  const notes = Array.from({ length: 25 }, () => crypto.randomUUID());
+  for (const [i, id] of notes.entries()) {
+    await DB.prepare(`INSERT INTO notes (id,title,body,url,pinned,archived,color,deleted_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(id, `日本語 ${i}`, '本文', 'https://example.com', i === 0 ? 1 : 0,
+        i === 1 ? 1 : 0, 'default', i === 2 ? new Date(now - 10 * day).toISOString() : null,
+        new Date(now).toISOString(), new Date(now).toISOString()).run();
+  }
+  const attachmentIds = Array.from({ length: 7 }, () => crypto.randomUUID());
+  for (const id of attachmentIds) {
+    await IMAGES.put(`notes/original/${id}`, bytes, { httpMetadata: { contentType: 'image/png' } });
+    await DB.prepare('INSERT INTO attachments VALUES (?,?,?,?,?,?)').bind(id, notes[0], '日本語.png',
+      'image/png', `notes/original/${id}`, new Date(now).toISOString()).run();
+  }
+  const group = crypto.randomUUID();
+  await DB.prepare('INSERT INTO label_groups VALUES (?,?,?)').bind(group, 'empty', '空グループ').run();
+  await DB.prepare('INSERT INTO labels (name_key,name,group_id) VALUES (?,?,?)').bind('unused', '未使用', group).run();
+
+  await t.test('disabled flag never reads or writes any service', async () => {
+    await advanceScheduledBackup({ AUTOMATIC_BACKUP_ENABLED: 'false' });
+    assert.equal(await hasRecentBackup({ AUTOMATIC_BACKUP_ENABLED: 'false' }), true);
+    assert.equal(await hasRecentBackup({ AUTOMATIC_BACKUP_ENABLED: 'true' }), false);
+  });
+  let done;
+  await t.test('multiple invocations create raw metadata and byte-exact attachments without changing D1', async () => {
+    const before = await DB.prepare('SELECT revision FROM data_revision').first();
+    done = await runToDone();
+    const manifest = await (await BACKUPS.get(`daily/${done.snapshot}/manifest.json`)).json();
+    assert.equal(manifest.status, 'complete');
+    assert.equal(manifest.tables.find(x => x.name === 'notes').rows, notes.length);
+    assert.ok(manifest.tables.find(x => x.name === 'notes').parts > 1);
+    assert.equal(manifest.attachments, 7);
+    assert.equal(manifest.attachment_bytes, 28);
+    for (const id of attachmentIds) {
+      const object = await BACKUPS.get(`daily/${done.snapshot}/files/${id}`);
+      assert.deepEqual(new Uint8Array(await object.arrayBuffer()), bytes);
+      assert.equal(object.httpMetadata.contentType, 'image/png');
+      assert.ok(await IMAGES.head(`notes/original/${id}`));
+    }
+    assert.deepEqual(await DB.prepare('SELECT revision FROM data_revision').first(), before);
+    assert.equal(await hasRecentBackup(env, now + 60 * 60_000), true);
+    assert.equal(await hasRecentBackup(env, now + 3 * day), false);
+  });
+  await t.test('actual scheduled output converts to the existing restore ZIP format', async () => {
+    const output = join(tmpdir(), `mykeep-backup-roundtrip-${crypto.randomUUID()}.zip`);
+    try {
+      const result = await runDownload(['latest', output], { downloadObject: async (_bucket, key, destination) => {
+        const object = await BACKUPS.get(key);
+        assert.ok(object, key);
+        await writeFile(destination, new Uint8Array(await object.arrayBuffer()), { flag: 'wx' });
+      } });
+      assert.equal(result.notes, notes.length);
+      assert.equal(result.attachments, attachmentIds.length);
+      const zip = await readBackupZip(new Blob([await readFile(output)]));
+      try {
+        assert.equal(zip.manifest.notes.length, notes.length);
+        assert.equal(zip.missingAttachments, 0);
+        assert.ok(zip.manifest.groups.some(g => g.id === group));
+        assert.ok(zip.manifest.memberships.some(m => m.label_name === '未使用' && m.group_id === group));
+        const first = zip.manifest.notes.find(n => n.id === notes[0]);
+        assert.equal(first.title, '日本語 0');
+        assert.equal(first.pinned, true);
+        const file = await zip.readAttachment(first.attachments[0]);
+        assert.deepEqual(new Uint8Array(await file.arrayBuffer()), bytes);
+      } finally { await zip.close(); }
+    } finally { await unlink(output).catch(error => { if (error.code !== 'ENOENT') throw error; }); }
+  });
+  await t.test('overlapping invocations cannot both advance a batch', async () => {
+    await BACKUPS.delete('progress.json');
+    let reads = 0;
+    let release;
+    const bothRead = new Promise(resolve => { release = resolve; });
+    const bucket = new Proxy(BACKUPS, { get(target, property) {
+      if (property === 'get') return async key => {
+        const object = await target.get(key);
+        if (key === 'progress.json') {
+          if (++reads === 2) release();
+          await bothRead;
+        }
+        return object;
+      };
+      const value = Reflect.get(target, property);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    await Promise.all([advanceInNode({ ...env, BACKUPS: bucket }, now), advanceInNode({ ...env, BACKUPS: bucket }, now)]);
+    const p = await progress();
+    assert.equal(p.phase, 'tables');
+    assert.equal(p.tables[0].rows, 0);
+    assert.equal(p.leaseUntil, 0);
+  });
+  await t.test('a changed revision rejects the incomplete snapshot and keeps the last completed backup', async () => {
+    const p = await progress();
+    await DB.prepare('UPDATE notes SET body = ? WHERE id = ?').bind('変更', notes[0]).run();
+    await advanceScheduledBackup(env, now + 60_000);
+    assert.equal((await progress()).phase, 'failed');
+    assert.equal(await BACKUPS.head(`daily/${p.snapshot}/manifest.json`), null);
+    assert.equal((await (await BACKUPS.get('latest.json')).json()).snapshot, done.snapshot);
+  });
+  await t.test('missing attachment retries but never publishes an incomplete backup', async () => {
+    await BACKUPS.delete('progress.json');
+    await IMAGES.delete(`notes/original/${attachmentIds[0]}`);
+    let p;
+    for (let i = 0; i < 50; i++) {
+      await advanceScheduledBackup(env, now + i * 5 * 60_000);
+      p = await progress();
+      if (p.phase === 'failed') break;
+    }
+    assert.equal(p.phase, 'failed');
+    assert.equal(await BACKUPS.head(`daily/${p.snapshot}/manifest.json`), null);
+    assert.equal((await (await BACKUPS.get('latest.json')).json()).snapshot, done.snapshot);
+    await IMAGES.put(`notes/original/${attachmentIds[0]}`, bytes, { httpMetadata: { contentType: 'image/png' } });
+  });
+  await t.test('7-day cleanup is scoped to backups and preserves latest and unrelated objects', async () => {
+    await BACKUPS.delete('progress.json');
+    done = await runToDone();
+    const old = `2000-01-01-${crypto.randomUUID()}`;
+    await BACKUPS.put(`daily/${old}/manifest.json`, '{}');
+    await BACKUPS.put(`daily/${old}/files/${crypto.randomUUID()}`, bytes);
+    await BACKUPS.put('unrelated/keep', bytes);
+    await advanceScheduledBackup(env, now + 60 * 60_000);
+    assert.equal(await BACKUPS.head(`daily/${old}/manifest.json`), null);
+    assert.ok(await BACKUPS.head(`daily/${done.snapshot}/manifest.json`));
+    assert.ok(await BACKUPS.head('unrelated/keep'));
+  });
+  await t.test('30-day cutoff preserves recent trash and active notes; expired attachments are removed', async () => {
+    const oldest = notes[3];
+    await DB.prepare('UPDATE notes SET deleted_at = ? WHERE id = ?').bind(new Date(now - 31 * day).toISOString(), oldest).run();
+    await DB.prepare('UPDATE notes SET deleted_at = ? WHERE id = ?').bind(new Date(now - 29 * day).toISOString(), notes[4]).run();
+    const a = crypto.randomUUID();
+    await IMAGES.put(`expired/${a}`, bytes);
+    await DB.prepare('INSERT INTO attachments VALUES (?,?,?,?,?,?)').bind(a, oldest, 'old.png', 'image/png', `expired/${a}`, new Date(now).toISOString()).run();
+    await BACKUPS.delete('latest.json');
+    await worker.scheduled({ cron: '0 18 * * *' }, env);
+    assert.ok(await DB.prepare('SELECT id FROM notes WHERE id = ?').bind(oldest).first());
+    await BACKUPS.delete('progress.json');
+    done = await runToDone();
+    const latest = await (await BACKUPS.get('latest.json')).json();
+    latest.completed_at = new Date(Date.now()).toISOString();
+    await BACKUPS.put('latest.json', JSON.stringify(latest));
+    await worker.scheduled({ cron: '0 18 * * *' }, env);
+    assert.equal(await DB.prepare('SELECT id FROM notes WHERE id = ?').bind(oldest).first(), null);
+    assert.equal(await IMAGES.head(`expired/${a}`), null);
+    for (const id of [notes[0], notes[2], notes[4]]) assert.ok(await DB.prepare('SELECT id FROM notes WHERE id = ?').bind(id).first());
+  });
+  await t.test('an explicit pending deletion still completes when no backup exists', async () => {
+    await BACKUPS.delete('latest.json');
+    const id = notes[5];
+    await DB.prepare('UPDATE notes SET deleted_at = ? WHERE id = ?').bind(new Date(now).toISOString(), id).run();
+    await DB.prepare('INSERT INTO note_deletions (note_id,r2_keys) VALUES (?,?)').bind(id, '[]').run();
+    await worker.scheduled({ cron: '0 18 * * *' }, env);
+    assert.equal(await DB.prepare('SELECT id FROM notes WHERE id = ?').bind(id).first(), null);
+  });
+  await t.test('additive restore uses the same 30-day retention rule', async () => {
+    for (const age of [10, 29, 31]) {
+      const deleted_at = new Date(now - age * day).toISOString();
+      const note = { id: crypto.randomUUID(), title: '復元', body: '本文を保持', url: '', color: 'default',
+        pinned: true, archived: true, trashed: true, deleted_at, created_at: deleted_at, updated_at: deleted_at,
+        checklist: [], labels: [], attachments: [] };
+      const response = await worker.fetch(new Request('https://local.test/api/backup/restore/notes', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note }),
+      }), env);
+      assert.equal(response.status, 200, await response.clone().text());
+      const row = await DB.prepare('SELECT body,pinned,archived,deleted_at FROM notes WHERE id = ?').bind(note.id).first();
+      assert.deepEqual(row, { body: note.body, pinned: 1, archived: 1, deleted_at: age < 30 ? deleted_at : null });
+    }
+  });
+  await t.test('corrupt progress fails closed without changing source data or publishing completion', async () => {
+    const before = await DB.prepare('SELECT revision FROM data_revision').first();
+    await BACKUPS.put('progress.json', JSON.stringify({ version: 1, phase: 'complete' }));
+    await assert.rejects(advanceInNode(env, now), /backup_invalid_progress/);
+    assert.deepEqual(await DB.prepare('SELECT revision FROM data_revision').first(), before);
+    assert.equal(await BACKUPS.head('latest.json'), null);
+    assert.equal(await hasRecentBackup(env, now), false);
+  });
+});

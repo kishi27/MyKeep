@@ -11,3 +11,4 @@ worker-configuration.d.ts
 .DS_Store
 Thumbs.db
 MyKeepプロンプト.md
+mykeep-scheduled-backup*.zip

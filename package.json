@@ -7,11 +7,15 @@
     "test": "node --test tests/regression.test.mjs",
     "test:browser": "node --test tests/browser.test.mjs",
     "test:extension": "node --test tests/extension.test.mjs",
+    "test:deployment": "node --test tests/deployment.test.mjs",
+    "test:backup": "node --test tests/scheduled-backup.test.mjs tests/backup-download.test.mjs",
     "build": "wrangler types && tsc --noEmit && vite build",
     "dev": "npm run build && wrangler dev",
     "db:local": "wrangler d1 migrations apply mykeep --local",
     "types": "wrangler types",
-    "deploy": "npm run build && wrangler deploy"
+    "db:check": "node scripts/check-migrations.mjs",
+    "deploy:checked": "npm run db:check && wrangler deploy",
+    "deploy": "npm run build && npm run deploy:checked"
   },
   "dependencies": {
     "@zip.js/zip.js": "^2.18.2",

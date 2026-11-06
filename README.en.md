@@ -34,7 +34,7 @@ Save the current page to MyKeep. The screenshot shows the older UI; the extensio
 - **Filters**: Use the sidebar to switch among all notes, pinned notes, unpinned notes, unlabeled notes, notes without images, archived notes, and Trash. Search within the current list; the “×” in the search field clears only the search text.
 - **Links**: Rich link previews can show a title, description, domain, and image. MyKeep falls back to a plain link when preview information cannot be fetched.
 - **Bulk actions**: Select individual notes, select all, or clear the selection. Archive, return notes to the main list, move them to Trash, restore or permanently delete them, add or remove labels, and undo supported actions.
-- **Trash**: Restore or permanently delete notes, see the time remaining before permanent deletion, empty all of Trash, and automatically delete notes after seven days.
+- **Trash**: Restore or permanently delete notes, see the time remaining before permanent deletion, empty all of Trash, and automatically delete notes after 30 days.
 - **Label management**: Create, rename, and delete labels, and organize them under non-nested groups. A label page includes regular and archived notes.
 - **Settings**: Configure rich link previews, whether note cards show titles and text, dark mode, and periodic refresh while MyKeep is visible.
 - **Chrome extension**: Save the current page’s title, URL, note, grouped labels, and image. Edit the title and pin the note before saving, fetch Open Graph / Twitter Card data, open saved notes in MyKeep, and repair thumbnails in bulk.
@@ -93,14 +93,15 @@ Set up and manage D1, R2, Cloudflare Access, and ``CAPTURE_API_KEY`` in your own
 ### Initial setup
 
 1. Sign in to your Cloudflare account with ``npx wrangler login``.
-2. Check whether D1 database ``mykeep`` and R2 bucket ``mykeep-images`` already exist. Reuse existing resources and create **only the ones that are missing**.
+2. Check whether D1 database ``mykeep`` and R2 buckets ``mykeep-images`` and ``mykeep-backups`` already exist. Reuse existing resources and create **only the ones that are missing**.
 
    ```sh
    npx wrangler d1 create mykeep
    npx wrangler r2 bucket create mykeep-images
+   npx wrangler r2 bucket create mykeep-backups
    ```
 
-3. Replace ``database_id`` in ``wrangler.jsonc`` with **your D1 database ID**. The D1 binding is ``DB`` and the R2 binding is ``IMAGES``. If you change either resource name, update its reference in the binding configuration as well. Do not enable public access for R2.
+3. Replace ``database_id`` in ``wrangler.jsonc`` with **your D1 database ID**. The D1 binding is ``DB``; R2 uses ``IMAGES`` for attachments and ``BACKUPS`` for the separate backup bucket. If you change a resource name, update its binding configuration as well. Do not enable public access for either R2 bucket. Buckets referenced by bindings must exist for deployment even when automatic backup is disabled.
 4. Apply all migrations to the production D1 database, then deploy the web app and Worker.
 
    ```sh
@@ -119,13 +120,19 @@ Set up and manage D1, R2, Cloudflare Access, and ``CAPTURE_API_KEY`` in your own
 
 Before saving personal data, confirm that Access protects the site and that requests without an API key or with an incorrect key are rejected. See [Security](#security) for the roles of each authentication layer.
 
+This deployment uses the `workers.dev` address as its production URL, so `workers_dev: true` is explicit and a Worker-targeted Access application protects it. Unused Version URLs (formerly Preview URLs) are disabled with `preview_urls: false`. When moving to a custom domain, verify its Access protection and update client URLs before setting `workers_dev: false`; disabling the current address otherwise disconnects the web app, extension, and shortcuts.
+
+Check **Workers & Pages → MyKeep → Settings → Domains & Routes** for disabled Version URLs, and verify that the Zero Trust Access application protects the target Worker. Without a login, the web app, regular APIs and attachment URLs must redirect to Access or be denied. Only `/api/capture` bypasses Access and separately requires its API key; do not extend that bypass to `/api/capture/*`. The Version URL setting takes effect after deployment.
+
 ### Continuous deployment
 
-The current setup is **push or merge to ``main`` on the connected GitHub repository → Cloudflare Workers Builds → automatic deployment**. For a fork, the trigger is **the ``main`` branch of your own fork**. Connect your fork in Cloudflare and set the build command to ``npm run build`` and the deploy command to ``npx wrangler deploy``.
+The current setup is **push or merge to ``main`` on the connected GitHub repository → Cloudflare Workers Builds → automatic deployment**. For a fork, the trigger is **the ``main`` branch of your own fork**. Connect your fork in Cloudflare and set the build command to ``npm run build`` and the deploy command to **``npm run deploy:checked``**. Replace an existing ``npx wrangler deploy`` command in the dashboard; updating the repository does not change that setting.
 
-``npm run deploy`` is for manual deployment and includes a build. **D1 migrations are not applied automatically by a push or by either deployment command.** When a new migration is added, run ``npx wrangler d1 migrations apply mykeep --local`` and ``npx wrangler d1 migrations apply mykeep --remote`` before pushing or merging to ``main`` starts automatic deployment.
+``npm run deploy`` is for manual deployment and includes a build. Both deployment paths first run ``npm run db:check`` to compare the production D1 migration history with filenames in ``migrations/``. Missing migrations, migrations present only in production, or a failed check stop deployment before publishing new code. **The check only runs SELECT; it never applies migrations.** The CI API token needs read access to the target D1 database.
 
-The Trash cleanup Cron is ``0 18 * * *`` in ``wrangler.jsonc`` (18:00 UTC / 03:00 Japan time every day). Notes that have been in Trash for seven days are permanently deleted during the next cleanup run, after their R2 attachments are deleted.
+Test new migrations locally, review their production impact and backups, and obtain approval before running ``npx wrangler d1 migrations apply mykeep --remote``. Then retry the build. Never edit an applied migration; add a new file instead. The check does not validate SQL contents or backward compatibility: prefer additive changes compatible with the running code, and plan destructive changes separately. Running ``npx wrangler deploy`` directly bypasses the check and is not the normal deployment path.
+
+The Trash cleanup Cron is ``0 18 * * *`` in ``wrangler.jsonc`` (18:00 UTC / 03:00 Japan time every day). Notes that have been in Trash for 30 days are permanently deleted during the next cleanup run, after their R2 attachments are deleted. When automatic backup is enabled, expiration is skipped unless a backup completed within the last 25 hours. Previously requested permanent deletions still retry.
 
 ## Update MyKeep
 
@@ -246,7 +253,7 @@ Imported data:
 - Item text, checked states, and order from ``listContent``, plus labels from ``labels[].name``.
 - Files matched to ``attachments[].filePath`` in the ZIP and saved to R2, including images and other attachments. Filenames with Japanese characters or spaces are supported. Non-image attachments can be downloaded.
 - HTTP(S) URLs and ``preview_title``, ``preview_description``, and ``preview_hostname`` restored from ``annotations`` with ``source: "WEBLINK"``. If the full note text is a URL, it can be used. When annotations are present, MyKeep prefers an entry matching the URL in the note; otherwise it uses the first valid entry.
-- Notes where ``isTrashed: true`` are imported into Trash with ``deleted_at`` set to the import time. They become eligible for automatic permanent deletion after seven days.
+- Notes where ``isTrashed: true`` are imported into Trash with ``deleted_at`` set to the import time. They become eligible for automatic permanent deletion after 30 days.
 
 Import does not fetch external pages and sets ``preview_image`` to empty. Takeout data alone may not include thumbnails. After migration, run [Thumbnail Repair](#thumbnail-repair) from the Chrome extension’s options. A rich link shown in the web list does not always save its fetched image URL as the note’s thumbnail.
 
@@ -303,11 +310,29 @@ Permanent deletion records the note and attachment keys in D1 before deleting R2
 
 Settings shows this browser's last completed Export date, note count and failed attachment count. Direct saves are marked as ZIP file write completed; ordinary downloads as ZIP generated; download started. Failed attachments are flagged as an incomplete backup. Export failures and cancelled save dialogs do not update the record. The record cannot confirm download completion or whether the file still exists, so also check the save location.
 
+### Scheduled backups (administrators)
+
+The `BACKUPS` binding uses a separate **private** R2 bucket, `mykeep-backups`, to save all regular, archived and trashed notes, checklists, labels/groups, attachment metadata and attachment bytes daily. Secrets, API keys, PIN and device settings are excluded. External thumbnails are stored as URLs only.
+
+`AUTOMATIC_BACKUP_ENABLED: "true"` enables backups; `"false"` disables them. This repository's production configuration enables backups. Before deploying a fork, review storage and operational requirements, create the bucket only if it is missing, and confirm public access is disabled. No D1 migration is needed.
+
+The daily cycle starts at 17:00 UTC (02:00 Japan time). A `* * * * *` Cron processes 20 metadata rows or five attachments per invocation, starting on the first tick after initial activation. Small JSON pages and streamed attachment copies avoid building a large ZIP in the Worker. Completion takes tens of minutes to hours; large datasets or Free-plan CPU limits can prevent completion. Data changes, missing attachments or read failures leave the snapshot incomplete, with up to three fresh attempts. Live notes are never locked or modified by the backup.
+
+`latest.json` points to the last completed snapshot. `daily/<snapshot>/manifest.json` records `status: "complete"`, completion time and counts. Check `progress.json` and the `scheduled_backup_incomplete` Worker log for failures. **Verify the first completion and monitor completion dates afterward.** Missing source attachments must be resolved before a new complete backup can finish. After success, old copies are removed to retain seven days; the last successful copy survives prolonged failures. Attachments are duplicated per snapshot, requiring roughly seven generations of storage, with additional temporary space for failed attempts. Staying within the free storage allowance is not guaranteed.
+
+On a PC with authenticated Wrangler and this repository's dependencies, download and convert a snapshot to an additive-restore-compatible ZIP without writing to Cloudflare or overwriting an existing output file:
+
+```sh
+node scripts/download-backup.mjs latest mykeep-scheduled-backup.zip
+```
+
+Replace `latest` with a snapshot ID from `latest.json` if needed; a third argument selects a different bucket. ZIPs contain private data: do not publish or commit them. The filename above is covered by `.gitignore`; save other filenames outside the repository. Automatic storage uses metadata JSON and attachment files; ZIP conversion runs on the PC. Restore through the existing additive restore feature below, which does not overwrite existing notes or roll back the database.
+
 ### Restore from a MyKeep backup
 
 Open **Settings menu → Import → Restore from MyKeep backup**, select a ZIP, review the counts, and press **Start additive restore**. Selecting the ZIP does not write data. Existing notes are never deleted or overwritten; only missing note IDs are added. Repeating the same ZIP does not duplicate notes.
 
-Unused labels and empty groups are restored. Existing groups and labels with the same name are reused, and existing label memberships take precedence. Older version 1 ZIPs without group metadata restore flat labels. Notes that have been in Trash for seven days or longer are restored outside Trash, keeping their archive state.
+Unused labels and empty groups are restored. Existing groups and labels with the same name are reused, and existing label memberships take precedence. Older version 1 ZIPs without group metadata restore flat labels. Notes that have been in Trash for 30 days or longer are restored outside Trash, keeping their archive state.
 
 Images and PDFs are uploaded to R2 one at a time, retaining attachment IDs, filenames, MIME types and dates. Missing attachments can be retried only when the note's identity is verified. Missing files, failures and conflicts are reported; unavailable card images fall back to Auto. External preview images are restored as URLs only, because their image files are not included in the ZIP.
 

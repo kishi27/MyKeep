@@ -18,6 +18,7 @@ import type { LinkPreview } from "./linkPreview";
 import { LANGUAGE_SETTING, LanguageContext, savedLanguage, useI18n, formatMessage } from "./i18n";
 import type { Language, MessageKey } from "./i18n";
 import { NOTE_COLORS } from "./types";
+import { TRASH_RETENTION_MS } from "./trashRetention";
 import type { Attachment, ChecklistInput, Note, NoteColor, NoteInput } from "./types";
 
 type NoteDates = Pick<Note, "created_at" | "updated_at">;
@@ -259,7 +260,7 @@ function trashRemainingDays(deletedAt: string | null): number | null {
   const deleted = deletedAt ? Date.parse(deletedAt) : NaN;
   if (!Number.isFinite(deleted)) return null;
   const day = 24 * 60 * 60 * 1000;
-  return Math.max(0, Math.ceil((deleted + 7 * day - Date.now()) / day));
+  return Math.max(0, Math.ceil((deleted + TRASH_RETENTION_MS - Date.now()) / day));
 }
 
 function savedSetting(key: string, fallback: boolean): boolean {
@@ -1904,7 +1905,7 @@ function MyKeep() {
       </div>
       <ListFilters criteria={{ view, search: searchInput, label: labelFilter, sort: sortOrder, dates: dateRange }} onDates={setDateRange} onLoad={loadSearch} />
       {view === "trash" && <div className="trash-header">
-        <p>{t("ゴミ箱内のメモは7日後に削除されます。")}</p>
+        <p>{t("ゴミ箱内のメモは30日後に削除されます。")}</p>
         <button type="button" className="danger" disabled={working || importing || exporting || !counts?.views.trash} onClick={() => void clearTrash()}>{t("ゴミ箱を空にする")}</button>
       </div>}
       {bulkResult && <p className={bulkResult.failed ? "error" : "bulk-result"} role={bulkResult.failed ? "alert" : "status"}>{uiMessage(bulkResult.message)}</p>}

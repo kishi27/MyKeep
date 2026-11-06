@@ -1,6 +1,8 @@
 import { NOTE_COLORS } from "../src/types";
 import { handleBackupRestore } from "./restoreBackup";
 import { linkPreview } from "./linkPreview";
+import { advanceScheduledBackup, hasRecentBackup } from "./scheduledBackup";
+import { TRASH_RETENTION_MS } from "../src/trashRetention";
 import {
   hashIdempotencyBytes,
   hashIdempotencyPayload,
@@ -1037,7 +1039,7 @@ async function updateNote(id: string, request: Request, env: Env): Promise<Respo
 async function moveToTrash(id: string, request: Request, env: Env): Promise<Response> {
   const now = new Date().toISOString();
   let deletedAt = now;
-  // 復元のUndoでは元のゴミ箱日時を戻し、7日の削除期限を維持する。
+  // 復元のUndoでは元のゴミ箱日時を戻し、元の削除期限を維持する。
   const bytes = request.body ? await readBytes(request, MAX_REQUEST_BYTES) : new Uint8Array();
   if (bytes.byteLength > 0) {
     let input: unknown;
@@ -1132,15 +1134,15 @@ async function emptyTrash(env: Env): Promise<Response> {
   return json({ deleted, failed });
 }
 
-async function purgeOldTrash(env: Env): Promise<void> {
-  const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+async function purgeOldTrash(env: Env, allowExpired = true): Promise<void> {
+  const cutoff = new Date(Date.now() - TRASH_RETENTION_MS).toISOString();
   let afterId = "";
   while (true) {
     const result = await env.DB.prepare(
       `SELECT id FROM notes WHERE deleted_at IS NOT NULL
-      AND (deleted_at <= ? OR EXISTS (SELECT 1 FROM note_deletions WHERE note_id = notes.id))
+      AND ((? = 1 AND deleted_at <= ?) OR EXISTS (SELECT 1 FROM note_deletions WHERE note_id = notes.id))
       AND id > ? ORDER BY id LIMIT 200`,
-    ).bind(cutoff, afterId).all<{ id: string }>();
+    ).bind(allowExpired ? 1 : 0, cutoff, afterId).all<{ id: string }>();
     const rows = result.results ?? [];
     if (!rows.length) break;
     afterId = rows[rows.length - 1].id;
@@ -1682,8 +1684,15 @@ async function deleteAttachment(noteId: string, attachmentId: string, env: Env):
 }
 
 export default {
-  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
-    await purgeOldTrash(env);
+  async scheduled(controller: ScheduledController, env: Env): Promise<void> {
+    if (controller.cron === "* * * * *") {
+      await advanceScheduledBackup(env);
+      return;
+    }
+    const backedUp = await hasRecentBackup(env);
+    if (!backedUp) console.error("trash_expiry_skipped_no_recent_backup");
+    // Finish explicit, already-claimed deletions even while a backup is waiting for them.
+    await purgeOldTrash(env, backedUp);
   },
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);

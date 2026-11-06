@@ -3,6 +3,7 @@ import {
   parseBackupNote,
 } from "../src/backupFormat";
 import type { BackupAttachment, BackupGroup, BackupMembership, BackupNote } from "../src/backupFormat";
+import { TRASH_RETENTION_MS } from "../src/trashRetention";
 
 const MAX_METADATA_BYTES = 128 * 1024;
 const MAX_NOTE_BYTES = 8 * 1024 * 1024;
@@ -10,7 +11,6 @@ const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const MAX_ATTACHMENT_REQUEST_BYTES = MAX_NOTE_BYTES + MAX_ATTACHMENT_BYTES + 256 * 1024;
 const MAX_GROUP_BATCH = 10;
 const MAX_MEMBERSHIP_BATCH = 50;
-const TRASH_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MIME_TYPE_PATTERN = /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i;
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"]);

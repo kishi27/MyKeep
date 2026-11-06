@@ -129,7 +129,7 @@ const english = {
   "サイドバー": "Sidebar", "メモの表示": "Note views", "メモ": "Notes", "ピンあり": "Pinned", "ピンなし": "Unpinned",
   "ラベルなし": "Unlabeled", "画像なし": "Without images", "ラベル": "Labels", "ラベル整理": "Manage labels",
   "更新中…": "Refreshing…", "離して更新": "Release to refresh", "引っ張って更新": "Pull to refresh",
-  "ゴミ箱内のメモは7日後に削除されます。": "Notes in Trash are permanently deleted after 7 days.", "ゴミ箱を空にする": "Empty Trash",
+  "ゴミ箱内のメモは30日後に削除されます。": "Notes in Trash are permanently deleted after 30 days.", "ゴミ箱を空にする": "Empty Trash",
   "該当するメモはありません。": "No matching notes.", "メモはまだありません。": "No notes yet.", "ピンありのメモはありません。": "No pinned notes.",
   "ピンなしのメモはありません。": "No unpinned notes.", "ラベルなしのメモはありません。": "No unlabeled notes.",
   "画像なしのメモはありません。": "No notes without images.", "アーカイブはありません。": "Archive is empty.", "ゴミ箱は空です。": "Trash is empty.",
