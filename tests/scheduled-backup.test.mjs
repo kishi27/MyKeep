@@ -13,7 +13,7 @@ async function load(path) {
 }
 const { advanceScheduledBackup: advanceInNode, hasRecentBackup } = await load('worker/scheduledBackup.ts');
 const { default: worker } = await load('worker/index.ts');
-const { readBackupZip } = await load('src/restoreBackup.ts');
+const { readBackupZip, restoreBackup } = await load('src/restoreBackup.ts');
 const day = 86_400_000;
 const bytes = new Uint8Array([10, 20, 30, 40]);
 
@@ -69,6 +69,12 @@ test('scheduled backups preserve data, resume safely, and gate automatic deletio
   const group = crypto.randomUUID();
   await DB.prepare('INSERT INTO label_groups VALUES (?,?,?)').bind(group, 'empty', '空グループ').run();
   await DB.prepare('INSERT INTO labels (name_key,name,group_id) VALUES (?,?,?)').bind('unused', '未使用', group).run();
+  await DB.prepare('INSERT INTO labels (name_key,name,group_id) VALUES (?,?,?)').bind('used', '復元用ラベル', group).run();
+  await DB.prepare('INSERT INTO note_labels VALUES (?,?)').bind(notes[0], 'used').run();
+  await DB.prepare('INSERT INTO checklist_items (id,note_id,position,text,checked) VALUES (?,?,?,?,?)')
+    .bind(crypto.randomUUID(), notes[0], 0, '完了済み', 1).run();
+  await DB.prepare('UPDATE notes SET preview_image = ?, card_image = ? WHERE id = ?')
+    .bind('https://example.com/preview.png', `attachment:${attachmentIds[0]}`, notes[0]).run();
 
   await t.test('disabled flag never reads or writes any service', async () => {
     await advanceScheduledBackup({ AUTOMATIC_BACKUP_ENABLED: 'false' });
@@ -123,7 +129,7 @@ test('scheduled backups preserve data, resume safely, and gate automatic deletio
     assert.equal(await hasRecentBackup(env, now + 60 * 60_000), true);
     assert.equal(await hasRecentBackup(env, now + 3 * day), false);
   });
-  await t.test('actual scheduled output converts to the existing restore ZIP format', async () => {
+  await t.test('actual scheduled output restores through the existing API into isolated D1 and R2', async () => {
     const output = join(tmpdir(), `mykeep-backup-roundtrip-${crypto.randomUUID()}.zip`);
     try {
       const result = await runDownload(['latest', output], { downloadObject: async (_bucket, key, destination) => {
@@ -144,6 +150,55 @@ test('scheduled backups preserve data, resume safely, and gate automatic deletio
         assert.equal(first.pinned, true);
         const file = await zip.readAttachment(first.attachments[0]);
         assert.deepEqual(new Uint8Array(await file.arrayBuffer()), bytes);
+
+        const destination = new Miniflare(convertV4MiniflareOptions({ workers: [{ name: 'restore-target', modules: true,
+          script: 'export default {fetch(){return new Response("test")}}', compatibilityDate: '2026-09-28',
+          d1Databases: ['DB'], r2Buckets: ['IMAGES'] }] }));
+        try {
+          const restoreEnv = { DB: await destination.getD1Database('DB'), IMAGES: await destination.getR2Bucket('IMAGES') };
+          for (const name of (await readdir('migrations')).filter(f => f.endsWith('.sql')).sort()) {
+            await restoreEnv.DB.exec((await readFile(`migrations/${name}`, 'utf8')).replace(/--[^\n]*/g, '').replace(/\r?\n/g, ' '));
+          }
+          const preserved = crypto.randomUUID();
+          await restoreEnv.DB.prepare('INSERT INTO notes (id,title,body,created_at,updated_at) VALUES (?,?,?,?,?)')
+            .bind(preserved, '既存メモを保持', '上書きしない', new Date(now).toISOString(), new Date(now).toISOString()).run();
+          const sourceBefore = await DB.prepare('SELECT revision FROM data_revision').first();
+          const fetcher = (path, init) => worker.fetch(new Request(`https://local.test${path}`, init), restoreEnv);
+          const result = await restoreBackup(zip, () => {}, fetcher);
+          assert.equal(result.partial, false, JSON.stringify(result));
+          assert.equal(result.notes.added, notes.length);
+          assert.equal(result.attachments.added, attachmentIds.length);
+          assert.equal(result.groups.added, 1);
+          assert.equal(result.labels.added, 2);
+          assert.equal((await restoreEnv.DB.prepare('SELECT count(*) AS n FROM notes').first()).n, notes.length + 1);
+          assert.equal((await restoreEnv.DB.prepare('SELECT body FROM notes WHERE id = ?').bind(preserved).first()).body, '上書きしない');
+          const restored = (await (await fetcher(`/api/notes/${notes[0]}`)).json()).note;
+          assert.equal(restored.title, first.title);
+          assert.equal(restored.body, first.body);
+          assert.equal(restored.url, first.url);
+          assert.equal(restored.created_at, first.created_at);
+          assert.equal(restored.updated_at, first.updated_at);
+          assert.equal(restored.pinned, true);
+          assert.deepEqual(restored.labels, ['復元用ラベル']);
+          assert.equal(restored.checklist[0].checked, true);
+          assert.equal(restored.preview_image, first.preview_image);
+          assert.equal(restored.card_image, `attachment:${attachmentIds[0]}`);
+          assert.equal((await restoreEnv.DB.prepare('SELECT archived FROM notes WHERE id = ?').bind(notes[1]).first()).archived, 1);
+          assert.equal((await restoreEnv.DB.prepare('SELECT deleted_at FROM notes WHERE id = ?').bind(notes[2]).first()).deleted_at,
+            zip.manifest.notes.find(n => n.id === notes[2]).deleted_at);
+          assert.equal((await restoreEnv.DB.prepare('SELECT group_id FROM labels WHERE name = ?').bind('復元用ラベル').first()).group_id, group);
+          for (const attachment of (await restoreEnv.DB.prepare('SELECT r2_key FROM attachments').all()).results) {
+            const saved = await restoreEnv.IMAGES.get(attachment.r2_key);
+            assert.deepEqual(new Uint8Array(await saved.arrayBuffer()), bytes);
+          }
+          const repeated = await restoreBackup(zip, () => {}, fetcher);
+          assert.equal(repeated.partial, false, JSON.stringify(repeated));
+          assert.equal(repeated.notes.added, 0);
+          assert.equal(repeated.notes.skipped, notes.length);
+          assert.equal(repeated.attachments.added, 0);
+          assert.equal(repeated.attachments.skipped, attachmentIds.length);
+          assert.deepEqual(await DB.prepare('SELECT revision FROM data_revision').first(), sourceBefore);
+        } finally { await destination.dispose(); }
       } finally { await zip.close(); }
     } finally { await unlink(output).catch(error => { if (error.code !== 'ENOENT') throw error; }); }
   });
