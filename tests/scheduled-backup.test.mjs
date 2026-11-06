@@ -226,4 +226,17 @@ test('scheduled backups preserve data, resume safely, and gate automatic deletio
     assert.equal(await BACKUPS.head('latest.json'), null);
     assert.equal(await hasRecentBackup(env, now), false);
   });
+  await t.test('one minute Cron cleans trash only on the 18:00 UTC tick', async () => {
+    const id = crypto.randomUUID();
+    const timestamp = new Date(now - 31 * day).toISOString();
+    await DB.prepare('INSERT INTO notes (id,title,body,url,pinned,archived,created_at,updated_at,deleted_at) VALUES (?,?,?,?,?,?,?,?,?)')
+      .bind(id, '期限経過', '', '', 0, 0, timestamp, timestamp, timestamp).run();
+    const bindings = { ...env, AUTOMATIC_BACKUP_ENABLED: 'false' };
+    for (const [hour, minute] of [[17, 59], [18, 1]]) {
+      await worker.scheduled({ cron: '* * * * *', scheduledTime: Date.UTC(2026, 10, 6, hour, minute) }, bindings);
+      assert.ok(await DB.prepare('SELECT id FROM notes WHERE id = ?').bind(id).first());
+    }
+    await worker.scheduled({ cron: '* * * * *', scheduledTime: Date.UTC(2026, 10, 6, 18, 0) }, bindings);
+    assert.equal(await DB.prepare('SELECT id FROM notes WHERE id = ?').bind(id).first(), null);
+  });
 });

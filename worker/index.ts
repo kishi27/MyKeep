@@ -1685,14 +1685,16 @@ async function deleteAttachment(noteId: string, attachmentId: string, env: Env):
 
 export default {
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {
-    if (controller.cron === "* * * * *") {
-      await advanceScheduledBackup(env);
-      return;
+    const minuteTick = controller.cron === "* * * * *";
+    const scheduledAt = new Date(controller.scheduledTime);
+    // Share one Cron slot: daily cleanup at 18:00 UTC, resumable backups every minute.
+    if (!minuteTick || (scheduledAt.getUTCHours() === 18 && scheduledAt.getUTCMinutes() === 0)) {
+      const backedUp = await hasRecentBackup(env);
+      if (!backedUp) console.error("trash_expiry_skipped_no_recent_backup");
+      // Finish explicit, already-claimed deletions even while a backup is waiting for them.
+      await purgeOldTrash(env, backedUp);
     }
-    const backedUp = await hasRecentBackup(env);
-    if (!backedUp) console.error("trash_expiry_skipped_no_recent_backup");
-    // Finish explicit, already-claimed deletions even while a backup is waiting for them.
-    await purgeOldTrash(env, backedUp);
+    if (minuteTick) await advanceScheduledBackup(env);
   },
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);

@@ -132,7 +132,7 @@ The current setup is **push or merge to ``main`` on the connected GitHub reposit
 
 Test new migrations locally, review their production impact and backups, and obtain approval before running ``npx wrangler d1 migrations apply mykeep --remote``. Then retry the build. Never edit an applied migration; add a new file instead. The check does not validate SQL contents or backward compatibility: prefer additive changes compatible with the running code, and plan destructive changes separately. Running ``npx wrangler deploy`` directly bypasses the check and is not the normal deployment path.
 
-The Trash cleanup Cron is ``0 18 * * *`` in ``wrangler.jsonc`` (18:00 UTC / 03:00 Japan time every day). Notes that have been in Trash for 30 days are permanently deleted during the next cleanup run, after their R2 attachments are deleted. When automatic backup is enabled, expiration is skipped unless a backup completed within the last 25 hours. Previously requested permanent deletions still retry.
+One ``* * * * *`` Cron in ``wrangler.jsonc`` handles backups and runs Trash cleanup only on the 18:00 UTC / 03:00 Japan time tick each day. Notes that have been in Trash for 30 days are permanently deleted during the next cleanup run, after their R2 attachments are deleted. When automatic backup is enabled, expiration is skipped unless a backup completed within the last 25 hours. Previously requested permanent deletions still retry.
 
 ## Update MyKeep
 
