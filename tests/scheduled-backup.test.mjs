@@ -53,14 +53,14 @@ test('scheduled backups preserve data, resume safely, and gate automatic deletio
     }
     assert.fail('backup failed to finish within bounded invocations');
   }
-  const notes = Array.from({ length: 25 }, () => crypto.randomUUID());
+  const notes = Array.from({ length: 225 }, () => crypto.randomUUID());
   for (const [i, id] of notes.entries()) {
     await DB.prepare(`INSERT INTO notes (id,title,body,url,pinned,archived,color,deleted_at,created_at,updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(id, `日本語 ${i}`, '本文', 'https://example.com', i === 0 ? 1 : 0,
         i === 1 ? 1 : 0, 'default', i === 2 ? new Date(now - 10 * day).toISOString() : null,
         new Date(now).toISOString(), new Date(now).toISOString()).run();
   }
-  const attachmentIds = Array.from({ length: 7 }, () => crypto.randomUUID());
+  const attachmentIds = Array.from({ length: 31 }, () => crypto.randomUUID());
   for (const id of attachmentIds) {
     await IMAGES.put(`notes/original/${id}`, bytes, { httpMetadata: { contentType: 'image/png' } });
     await DB.prepare('INSERT INTO attachments VALUES (?,?,?,?,?,?)').bind(id, notes[0], '日本語.png',
@@ -76,15 +76,43 @@ test('scheduled backups preserve data, resume safely, and gate automatic deletio
     assert.equal(await hasRecentBackup({ AUTOMATIC_BACKUP_ENABLED: 'true' }), false);
   });
   let done;
-  await t.test('multiple invocations create raw metadata and byte-exact attachments without changing D1', async () => {
+  await t.test('an in-progress 20-row snapshot resumes with 200 rows and 15 streamed files per invocation', async () => {
     const before = await DB.prepare('SELECT revision FROM data_revision').first();
-    done = await runToDone();
+    await advanceScheduledBackup(env, now);
+    const prior = await progress();
+    const legacyRows = (await DB.prepare('SELECT rowid AS __backup_rowid, * FROM notes ORDER BY rowid LIMIT 20').all()).results;
+    await BACKUPS.put(`daily/${prior.snapshot}/notes/000001.json`, JSON.stringify(
+      legacyRows.map(({ __backup_rowid, ...row }) => row)));
+    prior.tables[0].parts = 1;
+    prior.tables[0].rows = 20;
+    prior.after = legacyRows.at(-1).__backup_rowid;
+    await BACKUPS.put('progress.json', JSON.stringify(prior));
+    await advanceScheduledBackup(env, now + 60_000);
+    let p = await progress();
+    assert.equal(p.snapshot, prior.snapshot);
+    assert.equal(p.tables[0].rows, 220);
+    assert.equal(p.tables[0].parts, 2);
+    let sawFullFileBatch = false;
+    for (let tick = 2; tick < 30; tick++) {
+      const filesBefore = p.attachments;
+      await advanceScheduledBackup(env, now + tick * 60_000);
+      p = await progress();
+      assert.equal(p.snapshot, prior.snapshot);
+      assert.equal(p.attempts, 1);
+      assert.equal(p.errors, 0);
+      assert.ok(p.attachments - filesBefore <= 15);
+      if (p.attachments - filesBefore === 15) sawFullFileBatch = true;
+      if (p.phase === 'complete') break;
+    }
+    assert.equal(p.phase, 'complete');
+    assert.equal(sawFullFileBatch, true);
+    done = p;
     const manifest = await (await BACKUPS.get(`daily/${done.snapshot}/manifest.json`)).json();
     assert.equal(manifest.status, 'complete');
     assert.equal(manifest.tables.find(x => x.name === 'notes').rows, notes.length);
-    assert.ok(manifest.tables.find(x => x.name === 'notes').parts > 1);
-    assert.equal(manifest.attachments, 7);
-    assert.equal(manifest.attachment_bytes, 28);
+    assert.equal(manifest.tables.find(x => x.name === 'notes').parts, 3);
+    assert.equal(manifest.attachments, attachmentIds.length);
+    assert.equal(manifest.attachment_bytes, bytes.length * attachmentIds.length);
     for (const id of attachmentIds) {
       const object = await BACKUPS.get(`daily/${done.snapshot}/files/${id}`);
       assert.deepEqual(new Uint8Array(await object.arrayBuffer()), bytes);

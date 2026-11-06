@@ -240,3 +240,36 @@ test("existing output ZIP is never overwritten", async () => {
     assert.deepEqual(await readFile(output), prior);
   });
 });
+
+test("legacy and mixed pages remain readable after a batch-size rollback", async () => {
+  for (const pageSizes of [[20, 20, 5], [200, 20, 5]]) {
+    await testWorkspace(async ({ root, tempRoot }) => {
+      const { objects, manifest, tables } = makeFixture();
+      const total = pageSizes.reduce((sum, size) => sum + size, 0);
+      const notes = Array.from({ length: total }, (_, i) => i === 0 ? tables.notes[0]
+        : { ...tables.notes[0], id: crypto.randomUUID(), card_image: "auto" });
+      Object.assign(manifest.tables[0], { rows: total, parts: pageSizes.length });
+      objects.set(`daily/${SNAPSHOT}/manifest.json`, Buffer.from(JSON.stringify(manifest)));
+      let offset = 0;
+      for (const [index, size] of pageSizes.entries()) {
+        objects.set(`daily/${SNAPSHOT}/notes/${String(index + 1).padStart(6, "0")}.json`,
+          Buffer.from(JSON.stringify(notes.slice(offset, offset + size))));
+        offset += size;
+      }
+      const fake = fakeDownloader(objects);
+      const output = join(root, "compatible.zip");
+      const result = await runDownload(["latest", output], { downloadObject: fake.downloadObject, tempRoot });
+      assert.equal(result.notes, total);
+      const archive = await readBackupZip(new Blob([await readFile(output)]));
+      try { assert.equal(archive.manifest.notes.length, total); }
+      finally { await archive.close(); }
+
+      // Missing rows must still fail, even when the page size is flexible.
+      const lastKey = `daily/${SNAPSHOT}/notes/${String(pageSizes.length).padStart(6, "0")}.json`;
+      objects.set(lastKey, Buffer.from(JSON.stringify(notes.slice(-4))));
+      await assert.rejects(runDownload(["latest", join(root, "missing-row.zip")], {
+        downloadObject: fake.downloadObject, tempRoot,
+      }), /row count does not match/);
+    });
+  }
+});

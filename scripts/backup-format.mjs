@@ -7,7 +7,8 @@ export const TABLE_NAMES = Object.freeze([
   "note_labels",
 ]);
 
-export const TABLE_PAGE_SIZE = 20;
+export const TABLE_PAGE_SIZE = 200;
+export const LEGACY_TABLE_PAGE_SIZE = 20;
 export const MAX_NOTES_JSON_BYTES = 64 * 1024 * 1024;
 export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_ZIP_BYTES = 4 * 1024 * 1024 * 1024;
@@ -104,7 +105,10 @@ export function validateScheduledManifest(value, expectedSnapshot, latestComplet
       : name === "checklist_items" ? MAX_CHECKLIST_ROWS
       : name === "labels" || name === "label_groups" ? MAX_LABELS
       : MAX_NOTE_LABEL_ROWS;
-    if (rows > maxRows || parts !== Math.ceil(rows / TABLE_PAGE_SIZE)) invalid(`Invalid ${name} page counts.`);
+    // A deployment can change batch size while a snapshot is in progress.
+    // Accept old, new, and mixed pages; the downloader still verifies every row count.
+    if (rows > maxRows || parts < Math.ceil(rows / TABLE_PAGE_SIZE)
+      || parts > Math.ceil(rows / LEGACY_TABLE_PAGE_SIZE)) invalid(`Invalid ${name} page counts.`);
     return { name, parts, rows };
   });
   if (tables[1].rows !== attachments) invalid("Attachment count does not match the table manifest.");

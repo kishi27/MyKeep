@@ -3,8 +3,8 @@ const DAY = 86_400_000;
 const STATE_KEY = "progress.json";
 const LEASE_MS = 16 * 60_000; // Longer than the 15-minute Cron invocation limit.
 const TABLES = ["notes", "attachments", "checklist_items", "labels", "label_groups", "note_labels"] as const;
-const PAGE_SIZE = 20;
-const FILE_BATCH = 5;
+const PAGE_SIZE = 200;
+const FILE_BATCH = 15;
 
 interface BackupEnv {
   DB: D1Database;

@@ -15,6 +15,7 @@ import {
   MAX_ZIP_BYTES,
   TABLE_NAMES,
   TABLE_PAGE_SIZE,
+  LEGACY_TABLE_PAGE_SIZE,
   convertScheduledRows,
   validateBucketName,
   validateLatest,
@@ -227,8 +228,11 @@ async function fetchTableRows(snapshot, manifest, bucket, tempPath, download) {
         throw new Error("Backup table data exceeds the allowed limit.");
       }
       const rows = await readJsonFile(filePath, TABLE_PAGE_JSON_LIMIT);
-      const expectedCount = Math.min(TABLE_PAGE_SIZE, table.rows - allRows.length);
-      if (!Array.isArray(rows) || rows.length !== expectedCount) throw new Error(`Invalid ${table.name} page contents.`);
+      if (!Array.isArray(rows) || rows.length < 1 || rows.length > TABLE_PAGE_SIZE
+        || allRows.length + rows.length > table.rows
+        || (part < table.parts && rows.length !== TABLE_PAGE_SIZE && rows.length !== LEGACY_TABLE_PAGE_SIZE)) {
+        throw new Error(`Invalid ${table.name} page contents.`);
+      }
       allRows.push(...rows);
       await unlink(filePath);
     }
