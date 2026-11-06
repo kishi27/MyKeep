@@ -30,6 +30,7 @@ interface Progress {
   retryAt: number;
   leaseUntil: number;
   cleaned: boolean;
+  cleanupCursor?: string;
 }
 interface Latest { snapshot: string; completed_at: string }
 const snapshotPattern = /^\d{4}-\d{2}-\d{2}-[a-f0-9-]{36}$/;
@@ -64,7 +65,8 @@ function validProgress(value: Progress): boolean {
       && Number.isSafeInteger(table.parts) && table.parts >= 0 && Number.isSafeInteger(table.rows) && table.rows >= 0)
     && [value.table, value.after, value.revision, value.attachments, value.attachment_bytes, value.attempts,
       value.errors, value.retryAt, value.leaseUntil].every(n => Number.isSafeInteger(n) && n >= 0)
-    && value.table <= TABLES.length;
+    && value.table <= TABLES.length
+    && (value.cleanupCursor === undefined || typeof value.cleanupCursor === "string");
 }
 
 function newProgress(day: string, now: number, attempts: number): Progress {
@@ -120,16 +122,28 @@ async function copyFiles(env: BackupEnv, state: Progress): Promise<boolean> {
 
 async function pruneOldCopies(bucket: R2Bucket, state: Progress): Promise<void> {
   const latest = (await jsonObject<Latest>(bucket, "latest.json"))?.value;
-  if (!latest || !snapshotPattern.test(latest.snapshot)) throw new Error("backup_latest_missing");
+  if (latest && !snapshotPattern.test(latest.snapshot)) throw new Error("backup_invalid_latest");
   const cutoff = new Date(Date.parse(`${state.day}T00:00:00Z`) - 6 * DAY).toISOString().slice(0, 10);
   // Date-prefixed keys sort oldest first. Only this feature's namespace is eligible.
-  const page = await bucket.list({ prefix: "daily/", limit: 100 });
-  const expired = page.objects.filter(o => {
+  const page = await bucket.list({ prefix: "daily/", limit: 100, cursor: state.cleanupCursor });
+  let expired = page.objects.filter(o => {
     const snapshot = o.key.split("/")[1];
-    return snapshotPattern.test(snapshot) && snapshot.slice(0, 10) < cutoff && snapshot !== latest.snapshot;
+    return snapshotPattern.test(snapshot) && snapshot.slice(0, 10) < cutoff
+      && snapshot !== latest?.snapshot && snapshot !== state.snapshot;
   }).map(o => o.key);
+  if (!latest) {
+    // Publishing latest.json can fail after the complete manifest was written.
+    // Without the pointer, preserve completed snapshots rather than guess which is newest.
+    const complete = new Set(page.objects.filter(o => o.key.endsWith('/manifest.json')).map(o => o.key.split('/')[1]));
+    for (const snapshot of new Set(expired.map(key => key.split('/')[1]))) {
+      if (!complete.has(snapshot) && await bucket.head(`${root(snapshot)}manifest.json`)) complete.add(snapshot);
+    }
+    expired = expired.filter(key => !complete.has(key.split('/')[1]));
+  }
   if (expired.length) await bucket.delete(expired);
-  else state.cleaned = true; // Keep the last successful backup even after prolonged failures.
+  // Continue past a protected latest snapshot; it may fill more than one listing page.
+  state.cleanupCursor = page.truncated ? page.cursor : undefined;
+  state.cleaned = !page.truncated;
 }
 
 export async function hasRecentBackup(env: BackupEnv, now = Date.now()): Promise<boolean> {
@@ -157,7 +171,7 @@ export async function advanceScheduledBackup(env: BackupEnv, now = Date.now()): 
   if (state && (state.leaseUntil > now || state.retryAt > now)) return;
   if (!state || state.day !== day || (state.phase === "failed" && state.attempts < 3)) {
     state = newProgress(day, now, state?.day === day ? state.attempts + 1 : 1);
-  } else if (state.phase === "failed" || (state.phase === "complete" && state.cleaned)) return;
+  } else if ((state.phase === "failed" || state.phase === "complete") && state.cleaned) return;
   // An expired lease means the previous invocation did not save progress (e.g. CPU limit).
   if (state.leaseUntil) state.errors++;
   const prior = structuredClone(state);
@@ -168,10 +182,10 @@ export async function advanceScheduledBackup(env: BackupEnv, now = Date.now()): 
   });
   if (!claim) return; // Another Cron invocation owns this batch.
   try {
-    if (state.errors >= 3) throw new Error("backup_batch_retry_limit");
-    if (state.phase === "complete") {
+    if (state.phase === "complete" || state.phase === "failed") {
       await pruneOldCopies(bucket, state);
     } else {
+      if (state.errors >= 3) throw new Error("backup_batch_retry_limit");
       const revision = await checkpoint(env);
       if (state.phase === "start") {
         state.revision = revision;
@@ -207,7 +221,8 @@ export async function advanceScheduledBackup(env: BackupEnv, now = Date.now()): 
     // Retry the entire batch, not only its tail, when its writes succeeded but progress did not.
     state = prior;
     state.errors++;
-    if ((error instanceof Error && error.message === "backup_data_changed") || state.errors >= 3) state.phase = "failed";
+    if (prior.phase !== "complete" && prior.phase !== "failed"
+      && ((error instanceof Error && error.message === "backup_data_changed") || state.errors >= 3)) state.phase = "failed";
     state.retryAt = now + 5 * 60_000;
     console.error("scheduled_backup_incomplete", state.snapshot, error instanceof Error ? error.message : "storage_error");
   }

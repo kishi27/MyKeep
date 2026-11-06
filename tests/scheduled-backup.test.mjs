@@ -176,6 +176,45 @@ test('scheduled backups preserve data, resume safely, and gate automatic deletio
     assert.ok(await BACKUPS.head(`daily/${done.snapshot}/manifest.json`));
     assert.ok(await BACKUPS.head('unrelated/keep'));
   });
+  await t.test('exhausted backups prune expired partials beyond a protected listing page, even without any success', async () => {
+    const savedLatest = await (await BACKUPS.get('latest.json')).text();
+    const savedProgress = await progress();
+    const before = await DB.prepare('SELECT revision FROM data_revision').first();
+    const protectedSnapshot = `2000-01-01-${crypto.randomUUID()}`;
+    const expiredSnapshot = `2001-01-01-${crypto.randomUUID()}`;
+    const protectedKeys = Array.from({ length: 105 }, (_, i) => `daily/${protectedSnapshot}/files/${i}`);
+    for (const key of protectedKeys) await BACKUPS.put(key, bytes);
+    const expiredKey = `daily/${expiredSnapshot}/notes/000001.json`;
+    await BACKUPS.put(expiredKey, '[]');
+    await BACKUPS.put('latest.json', JSON.stringify({ snapshot: protectedSnapshot, completed_at: new Date(now).toISOString() }));
+    const exhausted = { ...savedProgress, phase: 'failed', attempts: 3, errors: 3,
+      retryAt: 0, leaseUntil: 0, cleaned: false, cleanupCursor: undefined };
+    await BACKUPS.put('progress.json', JSON.stringify(exhausted));
+    async function finishCleanup() {
+      for (let i = 0; i < 10; i++) {
+        await advanceScheduledBackup(env, now + i * 60_000);
+        if ((await progress()).cleaned) return;
+      }
+      assert.fail('bounded cleanup did not finish');
+    }
+    await finishCleanup();
+    assert.equal((await progress()).phase, 'failed');
+    assert.equal(await BACKUPS.head(expiredKey), null);
+    for (const key of protectedKeys) assert.ok(await BACKUPS.head(key));
+    // No completed snapshot yet: failed older attempts still must not accumulate forever.
+    await BACKUPS.delete('latest.json');
+    // A complete manifest whose latest-pointer write was lost must also remain safe.
+    await BACKUPS.put(`daily/${protectedSnapshot}/manifest.json`, JSON.stringify({ status: 'complete' }));
+    await BACKUPS.put(expiredKey, '[]');
+    await BACKUPS.put('progress.json', JSON.stringify(exhausted));
+    await finishCleanup();
+    assert.equal(await BACKUPS.head(expiredKey), null);
+    assert.equal(await BACKUPS.head('latest.json'), null);
+    for (const key of protectedKeys) assert.ok(await BACKUPS.head(key));
+    assert.deepEqual(await DB.prepare('SELECT revision FROM data_revision').first(), before);
+    await BACKUPS.put('latest.json', savedLatest);
+    await BACKUPS.put('progress.json', JSON.stringify(savedProgress));
+  });
   await t.test('30-day cutoff preserves recent trash and active notes; expired attachments are removed', async () => {
     const oldest = notes[3];
     await DB.prepare('UPDATE notes SET deleted_at = ? WHERE id = ?').bind(new Date(now - 31 * day).toISOString(), oldest).run();
